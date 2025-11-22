@@ -50,7 +50,51 @@ Download from [pandoc.org](https://pandoc.org/installing.html)
 pandoc --version
 ```
 
-## Installation
+## Quick Start (Recommended)
+
+### 1. Install Dependencies
+
+**Linux/macOS:**
+```bash
+./install.sh
+```
+
+**Windows:**
+```bash
+install.bat
+```
+
+The installer will:
+- ✅ Check for Python 3 installation
+- ✅ Check for Pandoc installation
+- ✅ Install Flask for the GUI
+- ✅ Make scripts executable
+
+### 2. Run the GUI
+
+**Linux/macOS:**
+```bash
+./gui.py
+```
+
+**Windows:**
+```bash
+python gui.py
+```
+
+Then open your browser to: **http://localhost:5000**
+
+The GUI provides:
+- 📁 Folder browser for easy selection
+- 📊 Real-time conversion progress
+- 🎨 Beautiful, user-friendly interface
+- ✅ Visual feedback and status updates
+
+---
+
+## Manual Installation
+
+If you prefer to install dependencies manually:
 
 1. Download the script:
 ```bash
@@ -66,7 +110,17 @@ chmod +x epub_to_md_converter.py
 
 ## Usage
 
-### Basic Usage
+### Option 1: Web GUI (Recommended)
+
+Run the GUI for an easy-to-use interface:
+
+```bash
+python3 gui.py
+```
+
+Then open http://localhost:5000 in your browser.
+
+### Option 2: Command Line
 
 Place your EPUB files in a folder, then run:
 

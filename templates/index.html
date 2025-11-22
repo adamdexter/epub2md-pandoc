@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EPUB to Markdown Converter</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .warning {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            color: #856404;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .warning.show {
+            display: block;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #333;
+            font-size: 1.05em;
+        }
+
+        .folder-input-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .folder-input-group input {
+            flex: 1;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            width: 100%;
+            padding: 15px;
+            font-size: 1.1em;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .progress-container {
+            margin-top: 30px;
+            display: none;
+        }
+
+        .progress-container.show {
+            display: block;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .progress-header h3 {
+            color: #333;
+        }
+
+        .status-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+
+        .status-running {
+            background: #ffc107;
+            color: #856404;
+        }
+
+        .status-complete {
+            background: #28a745;
+            color: white;
+        }
+
+        .progress-log {
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+
+        .progress-log p {
+            margin-bottom: 5px;
+            white-space: pre-wrap;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .help-text {
+            font-size: 0.9em;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+
+        .features {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 30px;
+        }
+
+        .features h3 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .features ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .features li {
+            padding: 8px 0;
+            color: #555;
+        }
+
+        .features li:before {
+            content: "✓ ";
+            color: #28a745;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+        }
+
+        .modal.show {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 80vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            margin: 0;
+        }
+
+        .modal-body {
+            padding: 20px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .folder-list {
+            list-style: none;
+        }
+
+        .folder-item {
+            padding: 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            transition: background 0.2s;
+        }
+
+        .folder-item:hover {
+            background: #f0f0f0;
+        }
+
+        .folder-item:before {
+            content: "📁";
+            margin-right: 10px;
+            font-size: 1.2em;
+        }
+
+        .breadcrumb {
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-family: monospace;
+            font-size: 0.9em;
+            word-break: break-all;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 1.5em;
+            cursor: pointer;
+            color: #6c757d;
+        }
+
+        .close-btn:hover {
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📚 EPUB to Markdown Converter</h1>
+            <p>Convert your EPUB books to AI-optimized Markdown files</p>
+        </div>
+
+        <div class="content">
+            <div id="pandoc-warning" class="warning">
+                <strong>⚠️ Warning:</strong> Pandoc is not installed. Please install it first:
+                <a href="https://pandoc.org/installing.html" target="_blank">https://pandoc.org/installing.html</a>
+            </div>
+
+            <form id="converter-form">
+                <div class="form-group">
+                    <label for="input-folder">Input Folder (containing EPUB files)</label>
+                    <div class="folder-input-group">
+                        <input type="text" id="input-folder" placeholder="e.g., /home/user/Books/epub" required>
+                        <button type="button" class="btn btn-secondary" onclick="browseFolder('input')">Browse</button>
+                    </div>
+                    <div class="help-text">Select the folder containing your EPUB files</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="output-folder">Output Folder (for Markdown files)</label>
+                    <div class="folder-input-group">
+                        <input type="text" id="output-folder" value="md processed books" required>
+                        <button type="button" class="btn btn-secondary" onclick="browseFolder('output')">Browse</button>
+                    </div>
+                    <div class="help-text">Choose where to save the converted Markdown files</div>
+                </div>
+
+                <button type="submit" class="btn btn-primary" id="convert-btn">
+                    Convert EPUBs to Markdown
+                </button>
+            </form>
+
+            <div id="progress-container" class="progress-container">
+                <div class="progress-header">
+                    <h3>Conversion Progress</h3>
+                    <span id="status-badge" class="status-badge status-running">
+                        <span class="spinner"></span> Running...
+                    </span>
+                </div>
+                <div class="progress-log" id="progress-log">
+                    <p>Starting conversion...</p>
+                </div>
+            </div>
+
+            <div class="features">
+                <h3>Features</h3>
+                <ul>
+                    <li>Batch processes all EPUB files in a folder</li>
+                    <li>Extracts metadata (title, author, year, edition)</li>
+                    <li>Creates AI-optimized filenames for easy reference</li>
+                    <li>Preserves document structure and hierarchy</li>
+                    <li>Outputs clean Markdown with ATX-style headings</li>
+                    <li>Extracts embedded images</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Folder Browser Modal -->
+    <div id="folder-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Select Folder</h3>
+                <button class="close-btn" onclick="closeFolderBrowser()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="breadcrumb" id="current-path"></div>
+                <ul class="folder-list" id="folder-list"></ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentBrowseTarget = 'input';
+        let currentPath = '';
+
+        // Check Pandoc installation on page load
+        window.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const response = await fetch('/check_pandoc');
+                const data = await response.json();
+
+                if (!data.installed) {
+                    document.getElementById('pandoc-warning').classList.add('show');
+                    document.getElementById('convert-btn').disabled = true;
+                }
+            } catch (error) {
+                console.error('Error checking Pandoc:', error);
+            }
+        });
+
+        // Handle form submission
+        document.getElementById('converter-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const inputFolder = document.getElementById('input-folder').value;
+            const outputFolder = document.getElementById('output-folder').value;
+
+            if (!inputFolder) {
+                alert('Please select an input folder');
+                return;
+            }
+
+            // Disable form
+            document.getElementById('convert-btn').disabled = true;
+            document.getElementById('convert-btn').innerHTML = '<span class="spinner"></span> Converting...';
+
+            // Show progress container
+            document.getElementById('progress-container').classList.add('show');
+            document.getElementById('progress-log').innerHTML = '<p>Starting conversion...</p>';
+
+            try {
+                // Start conversion
+                const response = await fetch('/convert', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        input_folder: inputFolder,
+                        output_folder: outputFolder
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    alert('Error: ' + error.error);
+                    document.getElementById('convert-btn').disabled = false;
+                    document.getElementById('convert-btn').innerHTML = 'Convert EPUBs to Markdown';
+                    return;
+                }
+
+                // Poll for status updates
+                pollStatus();
+
+            } catch (error) {
+                alert('Error starting conversion: ' + error);
+                document.getElementById('convert-btn').disabled = false;
+                document.getElementById('convert-btn').innerHTML = 'Convert EPUBs to Markdown';
+            }
+        });
+
+        // Poll conversion status
+        async function pollStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+
+                // Update progress log
+                const logContainer = document.getElementById('progress-log');
+                logContainer.innerHTML = '';
+                data.progress.forEach(line => {
+                    const p = document.createElement('p');
+                    p.textContent = line;
+                    logContainer.appendChild(p);
+                });
+                logContainer.scrollTop = logContainer.scrollHeight;
+
+                // Check if completed
+                if (data.completed) {
+                    document.getElementById('status-badge').className = 'status-badge status-complete';
+                    document.getElementById('status-badge').innerHTML = '✓ Complete';
+                    document.getElementById('convert-btn').disabled = false;
+                    document.getElementById('convert-btn').innerHTML = 'Convert EPUBs to Markdown';
+                } else if (data.running) {
+                    // Continue polling
+                    setTimeout(pollStatus, 500);
+                }
+
+            } catch (error) {
+                console.error('Error polling status:', error);
+                setTimeout(pollStatus, 1000);
+            }
+        }
+
+        // Browse folder
+        async function browseFolder(target) {
+            currentBrowseTarget = target;
+
+            // Get current path from input or use home directory
+            const inputField = document.getElementById(target + '-folder');
+            const initialPath = inputField.value || '~';
+
+            await loadFolder(initialPath);
+            document.getElementById('folder-modal').classList.add('show');
+        }
+
+        // Load folder contents
+        async function loadFolder(path) {
+            try {
+                const response = await fetch('/browse_folder', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ path: path })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    alert('Error: ' + error.error);
+                    return;
+                }
+
+                const data = await response.json();
+                currentPath = data.current;
+
+                // Update breadcrumb
+                document.getElementById('current-path').textContent = data.current;
+
+                // Update folder list
+                const folderList = document.getElementById('folder-list');
+                folderList.innerHTML = '';
+
+                // Add parent directory option
+                if (data.parent) {
+                    const li = document.createElement('li');
+                    li.className = 'folder-item';
+                    li.innerHTML = '⬆️ Parent Directory';
+                    li.onclick = () => loadFolder(data.parent);
+                    folderList.appendChild(li);
+                }
+
+                // Add current directory selection
+                const selectLi = document.createElement('li');
+                selectLi.className = 'folder-item';
+                selectLi.innerHTML = '✓ Select This Folder';
+                selectLi.style.fontWeight = 'bold';
+                selectLi.style.color = '#667eea';
+                selectLi.onclick = () => selectFolder(data.current);
+                folderList.appendChild(selectLi);
+
+                // Add subdirectories
+                data.items.forEach(item => {
+                    const li = document.createElement('li');
+                    li.className = 'folder-item';
+                    li.textContent = item.name;
+                    li.onclick = () => loadFolder(item.path);
+                    folderList.appendChild(li);
+                });
+
+            } catch (error) {
+                alert('Error loading folder: ' + error);
+            }
+        }
+
+        // Select folder
+        function selectFolder(path) {
+            document.getElementById(currentBrowseTarget + '-folder').value = path;
+            closeFolderBrowser();
+        }
+
+        // Close folder browser
+        function closeFolderBrowser() {
+            document.getElementById('folder-modal').classList.remove('show');
+        }
+
+        // Close modal on background click
+        document.getElementById('folder-modal').addEventListener('click', (e) => {
+            if (e.target.id === 'folder-modal') {
+                closeFolderBrowser();
+            }
+        });
+    </script>
+</body>
+</html>
