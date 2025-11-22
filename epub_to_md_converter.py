@@ -184,11 +184,14 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
     Post-process markdown to optimize for Claude Project Knowledge.
 
     Removes:
+    - Page navigation sections (CRITICAL - wastes 10K+ tokens)
     - Pandoc div artifacts (::: structures)
     - HTML anchor tags
+    - Class annotations {.className}
     - Broken image references
     - Verbose list formatting
     - HTML blocks
+    - Escaped apostrophes and quotes
 
     Adds:
     - Proper heading hierarchy
@@ -210,8 +213,38 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
         metadata.append("---")
         metadata.append("")
 
+    # CRITICAL: Remove page navigation sections (can waste 10,000+ tokens!)
+    # Matches sections like:
+    # ## Pages
+    # 1. [i](#page_i)
+    # 2. [ii](#page_ii)
+    # ... hundreds of lines ...
+    # This regex finds "## Pages" or "## Guide" through the next heading
+    content = re.sub(
+        r'^##\s+(Pages|Guide|Landmarks)\s*\n\n(?:[\s\S]*?)(?=^#[^#]|\Z)',
+        '',
+        content,
+        flags=re.MULTILINE
+    )
+
+    # Remove class annotations from headings and text: {.className}
+    # Example: # [Foreword]{.chapterTitle} → # Foreword
+    content = re.sub(r'\{\.[\w-]+\}', '', content)
+
+    # Remove bracket wrappers around heading text
+    # Example: # [Introduction] → # Introduction
+    content = re.sub(r'^(#{1,6})\s+\[([^\]]+)\]\s*$', r'\1 \2', content, flags=re.MULTILINE)
+
+    # Fix escaped apostrophes and quotes
+    content = content.replace("\\'", "'")
+    content = content.replace('\\"', '"')
+    content = content.replace('\\&', '&')
+
     # Remove HTML anchor tags []{#id}
     content = re.sub(r'\[\]\{#[^}]+\}', '', content)
+
+    # Remove inline anchor references like {#id}
+    content = re.sub(r'\{#[\w-]+\}', '', content)
 
     # Remove Pandoc div structures (:::, ::::, etc.)
     content = re.sub(r'^:{3,}.*$', '', content, flags=re.MULTILINE)
@@ -222,8 +255,9 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
     # Remove HTML figure tags
     content = re.sub(r'<figure[^>]*>.*?</figure>', '[Image removed]', content, flags=re.DOTALL)
 
-    # Remove or replace broken image references
-    content = re.sub(r'!\[.*?\]\(\.\/images\/[^)]+\)', '[Image removed]', content)
+    # Remove or replace broken image references (multiple patterns)
+    content = re.sub(r'!\[.*?\]\(\.?\/images\/[^)]+\)', '[Image removed]', content)
+    content = re.sub(r'!\[\]\([^)]*\.(jpg|jpeg|png|gif|svg)\)', '[Image removed]', content, flags=re.IGNORECASE)
 
     # Remove HTML comments
     content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
@@ -247,6 +281,9 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
     content = re.sub(r'^[ \t]*::: (?:ItemNumber|ItemContent|ClearBoth).*\n', '', content, flags=re.MULTILINE)
     content = re.sub(r'^[ \t]*:::[ \t]*\n', '', content, flags=re.MULTILINE)
 
+    # Remove "booksection" and similar class wrappers
+    content = re.sub(r'^[ \t]*::: (?:booksection|section|chapter).*\n', '', content, flags=re.MULTILINE)
+
     # Remove excessive blank lines (more than 2 consecutive)
     content = re.sub(r'\n{3,}', '\n\n', content)
 
@@ -255,6 +292,12 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
 
     # Clean up any remaining HTML tags (except for tables if needed)
     content = re.sub(r'<(?!table|tr|td|th|thead|tbody)[^>]+>', '', content)
+
+    # Remove empty headings (headings with no text)
+    content = re.sub(r'^#{1,6}\s*$', '', content, flags=re.MULTILINE)
+
+    # Final cleanup: remove more than 2 consecutive blank lines
+    content = re.sub(r'\n{3,}', '\n\n', content)
 
     # Add metadata header if we have any
     if metadata:
@@ -311,19 +354,31 @@ def convert_epub_to_md(epub_path: str, output_path: str,
         print(f"  🧹 Cleaning up markdown for Claude...")
 
         with open(output_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+            original_content = f.read()
+
+        original_size = len(original_content)
 
         # Apply Claude-specific optimizations
-        cleaned_content = clean_markdown_for_claude(content, title, author, year)
+        cleaned_content = clean_markdown_for_claude(original_content, title, author, year)
 
         # Write cleaned content back
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(cleaned_content)
 
-        # Report file size
-        file_size = os.path.getsize(output_path)
-        size_kb = file_size / 1024
-        print(f"  📊 File size: {size_kb:.1f} KB")
+        # Report statistics
+        cleaned_size = len(cleaned_content)
+        reduction = ((original_size - cleaned_size) / original_size * 100) if original_size > 0 else 0
+
+        file_size_kb = cleaned_size / 1024
+
+        # Count headings for quality check
+        import re
+        heading_count = len(re.findall(r'^#{1,6}\s+', cleaned_content, re.MULTILINE))
+
+        print(f"  📊 File size: {file_size_kb:.1f} KB")
+        if reduction > 0:
+            print(f"  🎯 Reduced by: {reduction:.1f}%")
+        print(f"  📑 Headings found: {heading_count}")
 
         return True
 

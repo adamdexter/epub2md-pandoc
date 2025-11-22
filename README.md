@@ -215,11 +215,16 @@ This converter is **specifically optimized** for uploading to Claude Projects wi
 - **Clean structure** for better document understanding
 
 ### 🚫 What Gets Removed:
+- **Page navigation sections** (CRITICAL - saves 10,000+ tokens per book!)
 - **Pandoc div artifacts** (`::: booksection`, etc.)
 - **HTML anchor tags** (`[]{#id}`)
+- **Class annotations** (`{.className}`)
 - **Broken image references** (replaced with `[Image removed]`)
 - **HTML comments and divs**
 - **Verbose list formatting**
+- **Escaped apostrophes** (`\'` → `'`)
+- **Bracket wrappers** in headings
+- **Empty headings**
 - **Excessive whitespace**
 
 ### 📊 Result:
@@ -297,6 +302,38 @@ cmd = [
 
 ### Filter by date
 Add a date filter to only process recent EPUBs, or books from specific years.
+
+## Testing
+
+Sample EPUBs for testing are in the `sample-epubs-for-testing/` folder. Add your own EPUBs there to test conversion quality.
+
+### Quick Quality Check
+
+After converting, the script reports:
+- **File size** in KB
+- **Reduction percentage** (how much cleanup was done)
+- **Heading count** (should be 50+ for book-length content)
+
+Example output:
+```
+🧹 Cleaning up markdown for Claude...
+📊 File size: 245.3 KB
+🎯 Reduced by: 35.2%
+📑 Headings found: 87
+```
+
+### Manual Verification
+
+```bash
+# Count headings (should be 50+ for books)
+grep -c "^#" output.md
+
+# Check for artifacts (should all be 0)
+grep -c "^:::" output.md
+grep -c "\[\]{#" output.md
+grep -c "## Pages" output.md
+grep -c "{\.\\w" output.md
+```
 
 ## Quality Checklist
 
