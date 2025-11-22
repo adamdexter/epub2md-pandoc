@@ -101,6 +101,7 @@ echo    python epub_to_md_converter.py C:\path\to\epub\folder
 echo.
 echo 2. GUI (recommended):
 echo    run_gui.bat
-echo    Then open http://localhost:5000 in your browser
+echo    Then open http://localhost:3763 in your browser
+echo    (Port 3763 = 'EPMD' on phone keypad - easy to remember!)
 echo.
 pause

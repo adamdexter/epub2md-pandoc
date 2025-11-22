@@ -180,13 +180,15 @@ def main():
     print("Starting web server...")
     print()
     print("Open your browser and navigate to:")
-    print("    http://localhost:5000")
+    print("    http://localhost:3763")
+    print()
+    print("(Port 3763 spells 'EPMD' on a phone - easy to remember!)")
     print()
     print("Press Ctrl+C to stop the server")
     print("=" * 60)
 
     # Run Flask app
-    app.run(debug=False, host='127.0.0.1', port=5000)
+    app.run(debug=False, host='127.0.0.1', port=3763)
 
 
 if __name__ == '__main__':

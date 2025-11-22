@@ -84,7 +84,9 @@ The installer will:
 run_gui.bat
 ```
 
-Then open your browser to: **http://localhost:5000**
+Then open your browser to: **http://localhost:3763**
+
+> 💡 **Port 3763?** On a phone keypad, 3763 spells "EPMD" (EPUB to MarkDown) - making it easy to remember!
 
 The GUI provides:
 - 📁 Folder browser for easy selection
@@ -126,7 +128,7 @@ Run the GUI for an easy-to-use interface:
 run_gui.bat
 ```
 
-Then open http://localhost:5000 in your browser.
+Then open http://localhost:3763 in your browser.
 
 ### Option 2: Command Line
 
