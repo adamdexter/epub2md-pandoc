@@ -119,46 +119,49 @@ def sanitize_filename(text: str) -> str:
     return text
 
 
-def create_ai_optimized_filename(title: Optional[str], author: Optional[str], 
+def create_ai_optimized_filename(title: Optional[str], author: Optional[str],
                                  year: Optional[str], edition: Optional[str],
                                  original_filename: str) -> str:
     """
     Create AI-optimized filename from metadata.
-    Format: Title - Author (Year) [Edition].md
+    Format: Title - Author Year Edition.md (no parentheses or brackets)
     """
     parts = []
-    
+
     # Use original filename as fallback for title
     if not title:
         title = Path(original_filename).stem
-    
+
     # Clean and add title
     clean_title = sanitize_filename(title)
     if clean_title:
         parts.append(clean_title)
-    
+
     # Add author
     if author:
         clean_author = sanitize_filename(author)
         if clean_author:
             parts.append(f"- {clean_author}")
-    
-    # Add year in parentheses
+
+    # Add year (no parentheses)
     if year:
-        parts.append(f"({year})")
-    
-    # Add edition in brackets
+        parts.append(year)
+
+    # Add edition (no brackets, convert to simple text)
     if edition:
         clean_edition = sanitize_filename(edition)
         if clean_edition:
-            parts.append(f"[{clean_edition}]")
-    
+            # Normalize edition format
+            clean_edition = clean_edition.replace('Edition', 'Ed').replace('edition', 'Ed')
+            parts.append(clean_edition)
+
     # Join parts and add extension
     filename = " ".join(parts) + ".md"
-    
-    # Final sanitization
+
+    # Final sanitization to remove any remaining special characters
+    filename = filename.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
     filename = sanitize_filename(filename.replace('.md', '')) + '.md'
-    
+
     return filename
 
 
@@ -174,42 +177,156 @@ def check_pandoc_installed() -> bool:
         return False
 
 
-def convert_epub_to_md(epub_path: str, output_path: str) -> bool:
+def clean_markdown_for_claude(content: str, title: Optional[str] = None,
+                               author: Optional[str] = None,
+                               year: Optional[str] = None) -> str:
     """
-    Convert EPUB to Markdown using Pandoc.
-    
+    Post-process markdown to optimize for Claude Project Knowledge.
+
+    Removes:
+    - Pandoc div artifacts (::: structures)
+    - HTML anchor tags
+    - Broken image references
+    - Verbose list formatting
+    - HTML blocks
+
+    Adds:
+    - Proper heading hierarchy
+    - Metadata header
+    - Clean formatting
+    """
+    import re
+
+    # Add metadata header
+    metadata = []
+    if title or author or year:
+        metadata.append("---")
+        if title:
+            metadata.append(f'title: "{title}"')
+        if author:
+            metadata.append(f'author: "{author}"')
+        if year:
+            metadata.append(f'year: {year}')
+        metadata.append("---")
+        metadata.append("")
+
+    # Remove HTML anchor tags []{#id}
+    content = re.sub(r'\[\]\{#[^}]+\}', '', content)
+
+    # Remove Pandoc div structures (:::, ::::, etc.)
+    content = re.sub(r'^:{3,}.*$', '', content, flags=re.MULTILINE)
+
+    # Remove HTML div tags with IDs
+    content = re.sub(r'<div[^>]*>.*?</div>', '', content, flags=re.DOTALL)
+
+    # Remove HTML figure tags
+    content = re.sub(r'<figure[^>]*>.*?</figure>', '[Image removed]', content, flags=re.DOTALL)
+
+    # Remove or replace broken image references
+    content = re.sub(r'!\[.*?\]\(\.\/images\/[^)]+\)', '[Image removed]', content)
+
+    # Remove HTML comments
+    content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
+
+    # Convert bold text at start of line to headings (likely chapter/section titles)
+    # Match lines that are ONLY bold text (likely headings)
+    def convert_bold_to_heading(match):
+        text = match.group(1)
+        # If it's all caps or title case and short, it's likely a heading
+        if text.isupper() or (len(text) < 60 and text[0].isupper()):
+            # Determine heading level based on length and style
+            if text.isupper() and len(text) < 30:
+                return f"# {text}"
+            else:
+                return f"## {text}"
+        return match.group(0)  # Keep as bold if not heading-like
+
+    content = re.sub(r'^\*\*([^\*]+)\*\*$', convert_bold_to_heading, content, flags=re.MULTILINE)
+
+    # Clean up list formatting - remove verbose Pandoc list structures
+    content = re.sub(r'^[ \t]*::: (?:ItemNumber|ItemContent|ClearBoth).*\n', '', content, flags=re.MULTILINE)
+    content = re.sub(r'^[ \t]*:::[ \t]*\n', '', content, flags=re.MULTILINE)
+
+    # Remove excessive blank lines (more than 2 consecutive)
+    content = re.sub(r'\n{3,}', '\n\n', content)
+
+    # Remove trailing whitespace from lines
+    content = re.sub(r'[ \t]+$', '', content, flags=re.MULTILINE)
+
+    # Clean up any remaining HTML tags (except for tables if needed)
+    content = re.sub(r'<(?!table|tr|td|th|thead|tbody)[^>]+>', '', content)
+
+    # Add metadata header if we have any
+    if metadata:
+        content = '\n'.join(metadata) + content
+
+    return content
+
+
+def convert_epub_to_md(epub_path: str, output_path: str,
+                       title: Optional[str] = None,
+                       author: Optional[str] = None,
+                       year: Optional[str] = None) -> bool:
+    """
+    Convert EPUB to Markdown using Pandoc with Claude optimization.
+
     Args:
         epub_path: Path to input EPUB file
         output_path: Path to output Markdown file
-        
+        title: Book title for metadata
+        author: Book author for metadata
+        year: Publication year for metadata
+
     Returns:
         True if conversion successful, False otherwise
     """
     try:
         # Create output directory if it doesn't exist
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        # Run Pandoc conversion
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        # Run Pandoc conversion with optimized settings
         cmd = [
             'pandoc',
             epub_path,
             '-o', output_path,
-            '--markdown-headings=atx',  # Use # style headings
-            '--wrap=none',  # Don't wrap lines
-            '--extract-media=.',  # Extract images to current directory
+            '--markdown-headings=atx',      # Use # style headings
+            '--wrap=none',                   # Don't wrap lines
+            '--strip-comments',              # Remove HTML comments
+            '--reference-links=false',       # Use inline links
+            '--standalone',                  # Produce standalone document
         ]
-        
-        result = subprocess.run(cmd, 
-                              capture_output=True, 
-                              text=True, 
+
+        result = subprocess.run(cmd,
+                              capture_output=True,
+                              text=True,
                               check=False)
-        
+
         if result.returncode != 0:
             print(f"  ❌ Pandoc error: {result.stderr}")
             return False
-        
+
+        # Post-process the markdown file for Claude optimization
+        print(f"  🧹 Cleaning up markdown for Claude...")
+
+        with open(output_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Apply Claude-specific optimizations
+        cleaned_content = clean_markdown_for_claude(content, title, author, year)
+
+        # Write cleaned content back
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(cleaned_content)
+
+        # Report file size
+        file_size = os.path.getsize(output_path)
+        size_kb = file_size / 1024
+        print(f"  📊 File size: {size_kb:.1f} KB")
+
         return True
-        
+
     except Exception as e:
         print(f"  ❌ Conversion error: {e}")
         return False
@@ -275,9 +392,9 @@ def process_folder(input_folder: str, output_folder: str = "md processed books")
         output_file = output_path / output_filename
         
         print(f"  ➡️  Output: {output_filename}")
-        
-        # Convert file
-        if convert_epub_to_md(str(epub_file), str(output_file)):
+
+        # Convert file with metadata
+        if convert_epub_to_md(str(epub_file), str(output_file), title, author, year):
             print(f"  ✅ Conversion successful!\n")
             successful += 1
         else:
