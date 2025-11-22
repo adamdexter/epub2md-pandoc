@@ -67,19 +67,21 @@ install.bat
 The installer will:
 - ✅ Check for Python 3 installation
 - ✅ Check for Pandoc installation
-- ✅ Install Flask for the GUI
-- ✅ Make scripts executable
+- ✅ Create a virtual environment (avoids system package conflicts)
+- ✅ Install Flask in the virtual environment
+- ✅ Create launcher scripts
+- ✅ Make all scripts executable
 
 ### 2. Run the GUI
 
 **Linux/macOS:**
 ```bash
-./gui.py
+./run_gui.sh
 ```
 
 **Windows:**
 ```bash
-python gui.py
+run_gui.bat
 ```
 
 Then open your browser to: **http://localhost:5000**
@@ -114,8 +116,14 @@ chmod +x epub_to_md_converter.py
 
 Run the GUI for an easy-to-use interface:
 
+**Linux/macOS:**
 ```bash
-python3 gui.py
+./run_gui.sh
+```
+
+**Windows:**
+```bash
+run_gui.bat
 ```
 
 Then open http://localhost:5000 in your browser.

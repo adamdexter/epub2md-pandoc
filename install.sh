@@ -125,21 +125,48 @@ install_pandoc() {
     print_success "Pandoc installed successfully"
 }
 
-# Install Flask for GUI
-install_flask() {
+# Create virtual environment and install Flask
+setup_venv() {
     echo ""
-    echo "Installing Flask for GUI..."
+    echo "Setting up virtual environment..."
 
-    if python3 -c "import flask" &> /dev/null; then
-        print_success "Flask is already installed"
+    VENV_DIR=".venv"
+
+    # Check if venv already exists
+    if [ -d "$VENV_DIR" ]; then
+        print_info "Virtual environment already exists"
     else
-        print_info "Installing Flask..."
-        python3 -m pip install --user flask
-        print_success "Flask installed successfully"
+        print_info "Creating virtual environment..."
+
+        # Try to install python3-venv if it's not available (for Debian/Ubuntu)
+        if [ "$OS" == "linux" ]; then
+            if ! python3 -m venv --help &> /dev/null; then
+                print_info "Installing python3-venv package..."
+                if command -v apt-get &> /dev/null; then
+                    sudo apt-get install -y python3-venv
+                fi
+            fi
+        fi
+
+        python3 -m venv "$VENV_DIR"
+        print_success "Virtual environment created"
+    fi
+
+    # Activate venv and install Flask
+    print_info "Installing Flask in virtual environment..."
+
+    # Use venv's pip directly (works without activation)
+    "$VENV_DIR/bin/pip" install flask &> /dev/null
+
+    if [ $? -eq 0 ]; then
+        print_success "Flask installed successfully in virtual environment"
+    else
+        print_error "Failed to install Flask"
+        exit 1
     fi
 }
 
-# Make scripts executable
+# Make scripts executable and create launcher
 make_executable() {
     echo ""
     echo "Making scripts executable..."
@@ -148,6 +175,30 @@ make_executable() {
     if [ -f "gui.py" ]; then
         chmod +x gui.py
     fi
+
+    # Create GUI launcher script
+    print_info "Creating GUI launcher script..."
+
+    cat > run_gui.sh << 'EOF'
+#!/bin/bash
+# EPUB to Markdown Converter - GUI Launcher
+# This script activates the virtual environment and runs the GUI
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+if [ ! -d ".venv" ]; then
+    echo "Error: Virtual environment not found!"
+    echo "Please run ./install.sh first"
+    exit 1
+fi
+
+# Activate virtual environment and run GUI
+source .venv/bin/activate
+python3 gui.py
+EOF
+
+    chmod +x run_gui.sh
 
     print_success "Scripts are now executable"
 }
@@ -183,8 +234,8 @@ main() {
         fi
     fi
 
-    # Install Flask
-    install_flask
+    # Setup virtual environment and install Flask
+    setup_venv
 
     # Make scripts executable
     make_executable
@@ -200,7 +251,7 @@ main() {
     echo "   ./epub_to_md_converter.py /path/to/epub/folder"
     echo ""
     echo "2. GUI (recommended):"
-    echo "   ./gui.py"
+    echo "   ./run_gui.sh"
     echo "   Then open http://localhost:5000 in your browser"
     echo ""
 }

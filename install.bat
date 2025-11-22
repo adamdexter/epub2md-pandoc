@@ -43,15 +43,51 @@ if %errorlevel% equ 0 (
 
 echo.
 
-REM Install Flask
-echo Installing Flask for GUI...
-python -m pip install --user flask >nul 2>&1
+REM Create virtual environment and install Flask
+echo Setting up virtual environment...
+if exist .venv (
+    echo [INFO] Virtual environment already exists
+) else (
+    echo [INFO] Creating virtual environment...
+    python -m venv .venv
+    if %errorlevel% equ 0 (
+        echo [OK] Virtual environment created
+    ) else (
+        echo [ERROR] Failed to create virtual environment
+        pause
+        exit /b 1
+    )
+)
+
+echo Installing Flask in virtual environment...
+.venv\Scripts\python.exe -m pip install flask >nul 2>&1
 if %errorlevel% equ 0 (
     echo [OK] Flask installed successfully
 ) else (
-    echo [WARNING] Flask installation may have failed
-    echo You can try installing it manually with: pip install flask
+    echo [ERROR] Failed to install Flask
+    pause
+    exit /b 1
 )
+
+REM Create GUI launcher script
+echo Creating GUI launcher script...
+(
+echo @echo off
+echo REM EPUB to Markdown Converter - GUI Launcher
+echo REM This script activates the virtual environment and runs the GUI
+echo.
+echo if not exist .venv (
+echo     echo Error: Virtual environment not found!
+echo     echo Please run install.bat first
+echo     pause
+echo     exit /b 1
+echo ^)
+echo.
+echo call .venv\Scripts\activate.bat
+echo python gui.py
+) > run_gui.bat
+
+echo [OK] Launcher script created
 
 echo.
 echo ==========================================
@@ -64,7 +100,7 @@ echo 1. Command line:
 echo    python epub_to_md_converter.py C:\path\to\epub\folder
 echo.
 echo 2. GUI (recommended):
-echo    python gui.py
+echo    run_gui.bat
 echo    Then open http://localhost:5000 in your browser
 echo.
 pause

@@ -3,3 +3,6 @@
 **/.DS_Store
 **/._.DS_Store
 __pycache__/
+.venv/
+run_gui.sh
+run_gui.bat
