@@ -280,6 +280,44 @@ def apply_aggressive_cleanup(content: str, artifacts: dict) -> str:
     return content
 
 
+def add_metadata_only(content: str, title: Optional[str] = None,
+                      author: Optional[str] = None,
+                      year: Optional[str] = None) -> str:
+    """
+    Add only YAML metadata header to already-optimal files.
+
+    This function is used when a file has a high optimization score (≥ 85%)
+    and doesn't need cleanup. It preserves the file exactly as-is and only
+    adds metadata.
+
+    Args:
+        content: Original markdown content
+        title: Book title for metadata
+        author: Book author for metadata
+        year: Publication year for metadata
+
+    Returns:
+        Content with metadata header prepended
+    """
+    # Build metadata header
+    metadata = []
+    if title or author or year:
+        metadata.append("---")
+        if title:
+            metadata.append(f'title: "{title}"')
+        if author:
+            metadata.append(f'author: "{author}"')
+        if year:
+            metadata.append(f'year: {year}')
+        metadata.append("---")
+        metadata.append("")
+
+        return '\n'.join(metadata) + content
+
+    # No metadata to add, return as-is
+    return content
+
+
 def clean_markdown_for_claude(content: str, title: Optional[str] = None,
                                author: Optional[str] = None,
                                year: Optional[str] = None) -> str:
@@ -486,9 +524,9 @@ def convert_epub_to_md(epub_path: str, output_path: str,
 
         print(f"  📈 Optimization score: {score:.1f}%")
 
-        # Phase 2: Conditional cleanup
-        if score < 75.0:
-            print(f"  🧹 Cleanup required (< 75%) - Running aggressive cleanup...")
+        # Phase 2: Conditional cleanup with 85% threshold
+        if score < 85.0:
+            print(f"  🧹 Cleanup required (< 85%) - Running aggressive cleanup...")
             # First apply aggressive cleanup for suboptimal EPUBs
             cleaned_content = apply_aggressive_cleanup(original_content, artifacts)
             # Then apply standard Claude optimizations
@@ -499,9 +537,9 @@ def convert_epub_to_md(epub_path: str, output_path: str,
             post_score = calculate_optimization_score(post_artifacts)
             print(f"  ✨ Post-cleanup score: {post_score:.1f}%")
         else:
-            print(f"  ✅ Already optimal (≥ 75%) - Running standard cleanup...")
-            # Just apply standard Claude optimizations
-            cleaned_content = clean_markdown_for_claude(original_content, title, author, year)
+            print(f"  ✅ Already optimal (≥ 85%) - Skipping cleanup, adding metadata only...")
+            # File is already clean - only add metadata, don't run cleanup
+            cleaned_content = add_metadata_only(original_content, title, author, year)
 
         # Write cleaned content back
         with open(output_path, 'w', encoding='utf-8') as f:

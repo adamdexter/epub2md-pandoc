@@ -9,7 +9,7 @@ Automatically converts EPUB files to Markdown with AI-optimized filenames that i
 - 🤖 **AI-optimized filenames** without special characters (parentheses, brackets)
 - 🧹 **Claude-optimized markdown** - automatically cleans up for RAG performance
 - 🎯 **Smart artifact detection** - analyzes and scores files before cleanup
-- 📈 **Conditional cleanup** - only applies aggressive cleanup when needed (< 75% score)
+- 📈 **Conditional cleanup** - only applies cleanup when needed (< 85% score)
 - 📝 **Proper heading hierarchy** using # ## ### syntax
 - 🎯 **Metadata headers** added to each file (YAML frontmatter)
 - 🚫 **Removes 7 types of artifacts**: header IDs, HTML blocks, citations, etc.
@@ -227,18 +227,18 @@ Before cleanup, the converter analyzes the markdown for 7 types of artifacts:
 
 ### Phase 2: Conditional Cleanup
 
-- **Score ≥ 75%**: File is already optimal → Standard cleanup only
-- **Score < 75%**: File needs help → Aggressive cleanup + Standard cleanup
+- **Score ≥ 85%**: File is already optimal → Skip cleanup, add metadata only
+- **Score < 85%**: File needs help → Aggressive cleanup + Standard cleanup
 
 ### Example Output
 
 **For well-formatted EPUB (e.g., Venture Deals):**
 ```
 🔍 Analyzing artifacts...
-📈 Optimization score: 95.3%
-✅ Already optimal (≥ 75%) - Running standard cleanup...
+📈 Optimization score: 98.2%
+✅ Already optimal (≥ 85%) - Skipping cleanup, adding metadata only...
 📊 File size: 245.3 KB
-🎯 Reduced by: 12.1%
+🎯 Reduced by: 0.2%
 📑 Headings found: 87
 🎉 Ready for Claude Projects!
 ```
@@ -252,8 +252,8 @@ Before cleanup, the converter analyzes the markdown for 7 types of artifacts:
    • Citations: 200
    • Image attributes: 45
 📈 Optimization score: 55.2%
-🧹 Cleanup required (< 75%) - Running aggressive cleanup...
-✨ Post-cleanup score: 88.1%
+🧹 Cleanup required (< 85%) - Running aggressive cleanup...
+✨ Post-cleanup score: 91.3%
 📊 File size: 312.7 KB
 🎯 Reduced by: 38.4%
 📑 Headings found: 142
