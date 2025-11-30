@@ -8,11 +8,13 @@ Automatically converts EPUB files to Markdown with AI-optimized filenames that i
 - 📖 **Extracts metadata** (title, author, year, edition) from EPUB files
 - 🤖 **AI-optimized filenames** without special characters (parentheses, brackets)
 - 🧹 **Claude-optimized markdown** - automatically cleans up for RAG performance
+- 🎯 **Smart artifact detection** - analyzes and scores files before cleanup
+- 📈 **Conditional cleanup** - only applies aggressive cleanup when needed (< 75% score)
 - 📝 **Proper heading hierarchy** using # ## ### syntax
 - 🎯 **Metadata headers** added to each file (YAML frontmatter)
-- 🚫 **Removes artifacts**: Pandoc divs, HTML anchors, broken image links
-- 📊 **Reports file size** to help monitor token efficiency
-- 🔄 **Preserves content** while removing formatting noise
+- 🚫 **Removes 7 types of artifacts**: header IDs, HTML blocks, citations, etc.
+- 📊 **Detailed reporting** - shows artifacts found, scores, and improvements
+- 🔄 **Preserves optimal files** - skips unnecessary cleanup for clean EPUBs
 
 ## Filename Format
 
@@ -203,6 +205,59 @@ Found 3 EPUB file(s) to convert.
 Conversion complete!
 ✅ Successful: 2
 📁 Output folder: /Users/adam/md processed books
+```
+
+## Smart Artifact Detection & Cleanup
+
+This converter uses a **two-phase intelligent cleanup system** that adapts to each EPUB's quality:
+
+### Phase 1: Analysis & Scoring
+
+Before cleanup, the converter analyzes the markdown for 7 types of artifacts:
+
+1. **Header IDs** - `## Title {#id .class}` (High impact: -0.5 pts per 1000 lines)
+2. **HTML blocks** - ` ``{=html} ` markers (High impact: -2.0 pts)
+3. **Complex citations** - `[[2020](#link){.biblioref}]` (Medium impact: -0.2 pts)
+4. **Image attributes** - `![](img.jpg){.class}` (Low impact: -0.1 pts)
+5. **Bracket classes** - `[Text]{.className}` (Medium impact: -0.3 pts)
+6. **XHTML links** - `[Link](#file.xhtml)` (Low impact: -0.1 pts)
+7. **Blockquote divs** - `> ::: {}` (Low impact: -0.05 pts)
+
+**Optimization Score** = 100% - (artifact density penalties)
+
+### Phase 2: Conditional Cleanup
+
+- **Score ≥ 75%**: File is already optimal → Standard cleanup only
+- **Score < 75%**: File needs help → Aggressive cleanup + Standard cleanup
+
+### Example Output
+
+**For well-formatted EPUB (e.g., Venture Deals):**
+```
+🔍 Analyzing artifacts...
+📈 Optimization score: 95.3%
+✅ Already optimal (≥ 75%) - Running standard cleanup...
+📊 File size: 245.3 KB
+🎯 Reduced by: 12.1%
+📑 Headings found: 87
+🎉 Ready for Claude Projects!
+```
+
+**For suboptimal EPUB (e.g., academic publisher):**
+```
+🔍 Analyzing artifacts...
+📋 Artifacts detected:
+   • Header IDs: 371
+   • HTML blocks: 26
+   • Citations: 200
+   • Image attributes: 45
+📈 Optimization score: 55.2%
+🧹 Cleanup required (< 75%) - Running aggressive cleanup...
+✨ Post-cleanup score: 88.1%
+📊 File size: 312.7 KB
+🎯 Reduced by: 38.4%
+📑 Headings found: 142
+🎉 Ready for Claude Projects!
 ```
 
 ## Claude Project Knowledge Optimization

@@ -177,6 +177,109 @@ def check_pandoc_installed() -> bool:
         return False
 
 
+def analyze_artifacts(content: str) -> dict:
+    """
+    Analyze markdown content for various artifact types.
+
+    Returns:
+        Dictionary with artifact counts and line count
+    """
+    import re
+
+    lines = content.split('\n')
+    line_count = len(lines)
+
+    artifacts = {
+        'line_count': line_count,
+        'header_ids': len(re.findall(r'^#{1,6}\s+.*\{#[^}]*\}', content, re.MULTILINE)),
+        'html_blocks': len(re.findall(r'^`{2}\{=html\}$', content, re.MULTILINE)),
+        'citations': len(re.findall(r'\[\[.*?\]\(#[^)]*\)\{\.biblioref[^}]*\}', content)),
+        'image_attrs': len(re.findall(r'!\[.*?\]\(.*?\)\{[^}]+\}', content)),
+        'bracket_classes': len(re.findall(r'\[[^\]]+\]\{[^}]+\}', content)),
+        'xhtml_links': len(re.findall(r'\[.*?\]\(#\d+_[^)]*\.xhtml[^)]*\)', content)),
+        'blockquote_divs': len(re.findall(r'^> ::: \{\}$', content, re.MULTILINE))
+    }
+
+    return artifacts
+
+
+def calculate_optimization_score(artifacts: dict) -> float:
+    """
+    Calculate optimization score based on artifact density.
+
+    Score starts at 100% and is reduced based on artifact density per 1000 lines.
+
+    Returns:
+        Optimization score (0-100)
+    """
+    line_count = artifacts['line_count']
+    if line_count == 0:
+        return 100.0
+
+    score = 100.0
+    density_factor = line_count / 1000.0
+
+    # Apply deductions based on artifact density
+    score -= (artifacts['header_ids'] / density_factor) * 0.5
+    score -= (artifacts['html_blocks'] / density_factor) * 2.0
+    score -= (artifacts['citations'] / density_factor) * 0.2
+    score -= (artifacts['image_attrs'] / density_factor) * 0.1
+    score -= (artifacts['bracket_classes'] / density_factor) * 0.3
+    score -= (artifacts['xhtml_links'] / density_factor) * 0.1
+    score -= (artifacts['blockquote_divs'] / density_factor) * 0.05
+
+    return max(0.0, score)
+
+
+def apply_aggressive_cleanup(content: str, artifacts: dict) -> str:
+    """
+    Apply aggressive cleanup operations for suboptimal EPUBs.
+
+    This runs additional cleanup beyond the basic operations when
+    the optimization score is below 75%.
+
+    Args:
+        content: Markdown content
+        artifacts: Artifact analysis results
+
+    Returns:
+        Cleaned content
+    """
+    import re
+
+    # Priority 1: Remove header ID/class attributes
+    if artifacts['header_ids'] > 0:
+        content = re.sub(r'^(#{1,6}\s+.*?)\s*\{#[^}]*\}.*$', r'\1', content, flags=re.MULTILINE)
+
+    # Priority 2: Remove HTML comment blocks
+    if artifacts['html_blocks'] > 0:
+        content = re.sub(r'^`{2}\{=html\}$', '', content, flags=re.MULTILINE)
+
+    # Priority 3: Simplify citation references
+    if artifacts['citations'] > 0:
+        # [[text](#link){.biblioref}] → [text]
+        content = re.sub(r'\[\[([^\]]*)\]\(#[^)]*\)\{[^}]*\}\]', r'[\1]', content)
+
+    # Priority 4: Remove image attributes
+    if artifacts['image_attrs'] > 0:
+        content = re.sub(r'(!\[[^\]]*\]\([^)]*\))\{[^}]*\}', r'\1', content)
+
+    # Priority 5: Remove bracketed text classes
+    if artifacts['bracket_classes'] > 0:
+        content = re.sub(r'(\[[^\]]+\])\{[^}]+\}', r'\1', content)
+
+    # Priority 6: Clean internal XHTML links
+    if artifacts['xhtml_links'] > 0:
+        content = re.sub(r'\[([^\]]*)\]\(#\d+_[^)]*\.xhtml[^)]*\)', r'[\1]', content)
+
+    # Priority 7: Clean blockquote divs
+    if artifacts['blockquote_divs'] > 0:
+        content = re.sub(r'^> ::: \{\}$', '', content, flags=re.MULTILINE)
+        content = re.sub(r'^> :::$', '', content, flags=re.MULTILINE)
+
+    return content
+
+
 def clean_markdown_for_claude(content: str, title: Optional[str] = None,
                                author: Optional[str] = None,
                                year: Optional[str] = None) -> str:
@@ -351,15 +454,54 @@ def convert_epub_to_md(epub_path: str, output_path: str,
             return False
 
         # Post-process the markdown file for Claude optimization
-        print(f"  🧹 Cleaning up markdown for Claude...")
+        print(f"  🔍 Analyzing artifacts...")
 
         with open(output_path, 'r', encoding='utf-8') as f:
             original_content = f.read()
 
         original_size = len(original_content)
 
-        # Apply Claude-specific optimizations
-        cleaned_content = clean_markdown_for_claude(original_content, title, author, year)
+        # Phase 1: Analyze artifacts
+        artifacts = analyze_artifacts(original_content)
+        score = calculate_optimization_score(artifacts)
+
+        # Report artifact analysis
+        total_artifacts = sum([artifacts[k] for k in artifacts.keys() if k != 'line_count'])
+        if total_artifacts > 0:
+            print(f"  📋 Artifacts detected:")
+            if artifacts['header_ids'] > 0:
+                print(f"     • Header IDs: {artifacts['header_ids']}")
+            if artifacts['html_blocks'] > 0:
+                print(f"     • HTML blocks: {artifacts['html_blocks']}")
+            if artifacts['citations'] > 0:
+                print(f"     • Citations: {artifacts['citations']}")
+            if artifacts['image_attrs'] > 0:
+                print(f"     • Image attributes: {artifacts['image_attrs']}")
+            if artifacts['bracket_classes'] > 0:
+                print(f"     • Bracket classes: {artifacts['bracket_classes']}")
+            if artifacts['xhtml_links'] > 0:
+                print(f"     • XHTML links: {artifacts['xhtml_links']}")
+            if artifacts['blockquote_divs'] > 0:
+                print(f"     • Blockquote divs: {artifacts['blockquote_divs']}")
+
+        print(f"  📈 Optimization score: {score:.1f}%")
+
+        # Phase 2: Conditional cleanup
+        if score < 75.0:
+            print(f"  🧹 Cleanup required (< 75%) - Running aggressive cleanup...")
+            # First apply aggressive cleanup for suboptimal EPUBs
+            cleaned_content = apply_aggressive_cleanup(original_content, artifacts)
+            # Then apply standard Claude optimizations
+            cleaned_content = clean_markdown_for_claude(cleaned_content, title, author, year)
+
+            # Re-analyze to show improvement
+            post_artifacts = analyze_artifacts(cleaned_content)
+            post_score = calculate_optimization_score(post_artifacts)
+            print(f"  ✨ Post-cleanup score: {post_score:.1f}%")
+        else:
+            print(f"  ✅ Already optimal (≥ 75%) - Running standard cleanup...")
+            # Just apply standard Claude optimizations
+            cleaned_content = clean_markdown_for_claude(original_content, title, author, year)
 
         # Write cleaned content back
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -379,6 +521,7 @@ def convert_epub_to_md(epub_path: str, output_path: str,
         if reduction > 0:
             print(f"  🎯 Reduced by: {reduction:.1f}%")
         print(f"  📑 Headings found: {heading_count}")
+        print(f"  🎉 Ready for Claude Projects!")
 
         return True
 
