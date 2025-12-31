@@ -268,49 +268,125 @@ def upload_file():
         return jsonify({'error': str(e), 'success': False}), 500
 
 
-@app.route('/native_folder_dialog', methods=['POST'])
-def native_folder_dialog():
-    """Open native folder picker dialog using tkinter"""
-    data = request.json
-    initial_dir = data.get('initial_dir', get_downloads_folder())
-    title = data.get('title', 'Select Folder')
+def open_folder_dialog_native(initial_dir, title):
+    """
+    Try to open a native folder dialog using various methods.
+    Returns (path, success, error_message)
+    """
+    import subprocess
+    import shutil
 
+    # Ensure initial_dir exists
+    initial_dir = os.path.expanduser(initial_dir)
+    if not os.path.exists(initial_dir):
+        initial_dir = get_downloads_folder()
+
+    # Method 1: Try tkinter
     try:
-        # Import tkinter only when needed
         import tkinter as tk
         from tkinter import filedialog
 
-        # Create and hide the root window
         root = tk.Tk()
         root.withdraw()
-        root.attributes('-topmost', True)  # Bring dialog to front
+        root.attributes('-topmost', True)
 
-        # Expand path and ensure it exists
-        initial_dir = os.path.expanduser(initial_dir)
-        if not os.path.exists(initial_dir):
-            initial_dir = get_downloads_folder()
-
-        # Open the folder dialog
         folder_path = filedialog.askdirectory(
             initialdir=initial_dir,
             title=title
         )
-
-        # Destroy the root window
         root.destroy()
 
         if folder_path:
-            return jsonify({'path': folder_path, 'selected': True})
+            return folder_path, True, None
         else:
-            return jsonify({'path': '', 'selected': False})
-
+            return '', False, None  # User cancelled
     except ImportError:
+        pass  # tkinter not available, try next method
+    except Exception as e:
+        pass  # tkinter failed, try next method
+
+    # Method 2: Try zenity (Linux/GNOME)
+    if shutil.which('zenity'):
+        try:
+            result = subprocess.run(
+                ['zenity', '--file-selection', '--directory',
+                 '--title=' + title, '--filename=' + initial_dir + '/'],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip(), True, None
+            elif result.returncode == 1:
+                return '', False, None  # User cancelled
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # Method 3: Try kdialog (Linux/KDE)
+    if shutil.which('kdialog'):
+        try:
+            result = subprocess.run(
+                ['kdialog', '--getexistingdirectory', initial_dir, '--title', title],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip(), True, None
+            elif result.returncode == 1:
+                return '', False, None  # User cancelled
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # Method 4: Try osascript (macOS)
+    if shutil.which('osascript'):
+        try:
+            script = f'''
+            set folderPath to POSIX path of (choose folder with prompt "{title}" default location POSIX file "{initial_dir}")
+            return folderPath
+            '''
+            result = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().rstrip('/'), True, None
+            elif result.returncode == 1:
+                return '', False, None  # User cancelled
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # No native dialog method available
+    return '', False, 'No native dialog tool available (install zenity, kdialog, or tkinter)'
+
+
+@app.route('/native_folder_dialog', methods=['POST'])
+def native_folder_dialog():
+    """Open native folder picker dialog using best available method"""
+    data = request.json
+    initial_dir = data.get('initial_dir', get_downloads_folder())
+    title = data.get('title', 'Select Folder')
+
+    path, success, error = open_folder_dialog_native(initial_dir, title)
+
+    if error:
         return jsonify({
-            'error': 'Native folder dialog not available (tkinter not installed)',
+            'error': error,
             'selected': False
         }), 500
-    except Exception as e:
-        return jsonify({'error': str(e), 'selected': False}), 500
+
+    return jsonify({
+        'path': path,
+        'selected': success
+    })
 
 
 def main():

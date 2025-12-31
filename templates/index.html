@@ -652,15 +652,18 @@
                     const data = await response.json();
 
                     if (response.ok && data.selected) {
+                        // User selected a folder
                         inputField.value = data.path;
                         savePreferences();
                         return;
                     } else if (response.ok && !data.selected) {
-                        // User cancelled, do nothing
+                        // User cancelled native dialog, do nothing
                         return;
-                    } else if (data.error && data.error.includes('not available')) {
-                        // Native dialog not available, fall back to modal
+                    } else if (!response.ok) {
+                        // Server error (500) - native dialog not available
+                        console.log('Native dialog not available:', data.error);
                         nativeDialogAvailable = false;
+                        // Continue to fallback modal below
                     }
                 } catch (error) {
                     console.error('Native dialog error:', error);
