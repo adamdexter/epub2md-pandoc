@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Optional, Tuple
 import xml.etree.ElementTree as ET
 import zipfile
+from datetime import datetime
+
+# Script version for tracking conversions
+CONVERTER_VERSION = "2.0.3"  # Update this when making changes
 
 def extract_epub_metadata(epub_path: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
@@ -399,6 +403,11 @@ def add_metadata_only(content: str, title: Optional[str] = None,
             metadata.append(f'author: "{author}"')
         if year:
             metadata.append(f'year: {year}')
+
+        # Add version tracking (invisible to Claude Projects)
+        metadata.append(f'converter_version: "{CONVERTER_VERSION}"')
+        metadata.append(f'processed_date: "{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"')
+
         metadata.append("---")
         metadata.append("")
 
@@ -441,6 +450,11 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
             metadata.append(f'author: "{author}"')
         if year:
             metadata.append(f'year: {year}')
+
+        # Add version tracking (invisible to Claude Projects)
+        metadata.append(f'converter_version: "{CONVERTER_VERSION}"')
+        metadata.append(f'processed_date: "{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"')
+
         metadata.append("---")
         metadata.append("")
 
