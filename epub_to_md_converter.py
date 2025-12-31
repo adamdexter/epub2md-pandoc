@@ -192,7 +192,7 @@ def analyze_artifacts(content: str) -> dict:
     artifacts = {
         'line_count': line_count,
         'header_ids': len(re.findall(r'^#{1,6}\s+.*\{#[^}]*\}', content, re.MULTILINE)),
-        'html_blocks': len(re.findall(r'^`{2}\{=html\}$', content, re.MULTILINE)),
+        'html_blocks': content.count('``{=html}'),
         'citations': len(re.findall(r'\[\[.*?\]\(#[^)]*\)\{\.biblioref[^}]*\}', content)),
         'image_attrs': len(re.findall(r'!\[.*?\]\(.*?\)\{[^}]+\}', content)),
         'bracket_classes': len(re.findall(r'\[[^\]]+\]\{[^}]+\}', content)),
@@ -270,14 +270,24 @@ def apply_aggressive_cleanup(content: str, artifacts: dict, verbose: bool = Fals
             print(f"       → Removed {header_attrs_before - header_attrs_after} header attributes")
         operations_run.append(f"header_attrs: {header_attrs_before} → {header_attrs_after}")
 
-    # Priority 2: Remove HTML comment blocks (FIXED - proper backtick escaping)
-    if artifacts['html_blocks'] > 0:
-        before = len(re.findall(r'^``\{=html\}$', content, re.MULTILINE))
-        content = re.sub(r'^``\{=html\}$', '', content, flags=re.MULTILINE)
-        after = len(re.findall(r'^``\{=html\}$', content, re.MULTILINE))
-        if verbose and before > after:
-            print(f"       → Removed {before - after} HTML blocks")
-        operations_run.append(f"html_blocks: {before} → {after}")
+    # Priority 2: Remove HTML comment blocks (BRUTE FORCE - string matching)
+    html_block_count = content.count('``{=html}')
+    if html_block_count > 0:
+        lines = content.split('\n')
+        cleaned_lines = []
+        removed = 0
+
+        for line in lines:
+            if line.strip() == '``{=html}':
+                removed += 1
+                continue  # Skip HTML block lines
+            cleaned_lines.append(line)
+
+        content = '\n'.join(cleaned_lines)
+
+        if verbose:
+            print(f"       → Removed {removed} HTML blocks")
+        operations_run.append(f"html_blocks: {html_block_count} → 0")
 
     # Priority 3: Simplify citation references
     if artifacts['citations'] > 0:
