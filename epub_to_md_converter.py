@@ -15,7 +15,7 @@ import zipfile
 from datetime import datetime
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "2.1.0"  # Update this when making changes
+CONVERTER_VERSION = "2.2.0"  # Update this when making changes
 
 # EPUB Quality Pre-Check Configuration
 EPUB_QUALITY_THRESHOLD = 70.0  # Minimum quality score (0-100)
@@ -296,14 +296,19 @@ def assess_epub_quality(epub_path: str) -> dict:
 
         # Issue 1: Missing headings (critical - structure problem)
         if line_count > 1000 and heading_count == 0:
-            issues.append(f"CRITICAL: Zero headings detected in {line_count} lines")
-            score -= 40.0
-
-            # Check for undetected heading patterns
+            # Check if this is AUTO-FIXABLE (has Calibre markers)
             if calibre_markers > 50:
-                issues.append(f"Found {calibre_markers} Calibre-style markers - needs heading conversion")
+                # This will be automatically fixed during conversion - lower penalty
+                issues.append(f"Fixable: {calibre_markers} Calibre-style markers detected (will auto-convert to headings)")
+                score -= 15.0  # Lower penalty - converter handles this automatically
             elif caps_lines > 30:
-                issues.append(f"Found {caps_lines} ALL-CAPS lines - possible undetected headings")
+                # ALL-CAPS pattern - not auto-fixable, but detectable
+                issues.append(f"WARNING: {caps_lines} ALL-CAPS lines - possible undetected headings (not auto-fixable)")
+                score -= 30.0
+            else:
+                # No detectable patterns - critical issue
+                issues.append(f"CRITICAL: Zero headings detected in {line_count} lines")
+                score -= 40.0
         elif line_count > 1000 and heading_count < 10:
             issues.append(f"WARNING: Only {heading_count} headings in {line_count} lines")
             score -= 20.0
@@ -699,6 +704,74 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
             cleaned_lines.append(line)
 
         content = '\n'.join(cleaned_lines)
+
+    # ========================================================================
+    # AUTO-CONVERT CALIBRE-STYLE HEADINGS
+    # ========================================================================
+    # Some EPUBs (e.g., Calibre conversions) use [TEXT]{.calibreX} instead of
+    # proper markdown headings. Automatically detect and convert these to
+    # standard markdown heading format.
+
+    if '{.calibre' in content:
+        lines = content.split('\n')
+        converted_lines = []
+        conversions = 0
+
+        for line in lines:
+            # Pattern: [**TEXT**]{.calibreX} or [TEXT]{.calibreX}
+            # Examples:
+            #   [CHAPTER 1]{.calibre3}
+            #   [**THE FOUNDATION FOR COACHING**]{.calibre3}
+            match = re.match(r'^\[(\*\*)?(.*?)(\*\*)?\]\{\.calibre\d+\}(.*)$', line)
+
+            if match:
+                has_bold = bool(match.group(1))  # Check if has ** markers
+                text = match.group(2).strip()
+                trailing = match.group(4)  # Capture any trailing content
+
+                # Skip empty or punctuation-only text
+                if not text or text in [':', '-', '*', '**', '  ']:
+                    converted_lines.append(line)
+                    continue
+
+                # Determine heading level based on content and formatting
+                # Level 1: Chapters and major sections
+                if 'CHAPTER' in text.upper() and re.match(r'.*CHAPTER\s+\d+', text.upper()):
+                    line = f'# {text}{trailing}'
+                    conversions += 1
+                elif 'PART' in text.upper() and re.match(r'.*PART\s+[IVX0-9]+', text.upper()):
+                    line = f'# {text}{trailing}'
+                    conversions += 1
+                elif text.upper() in [
+                    'DEDICATION', 'INTRODUCTION', 'CONCLUSION', 'GLOSSARY',
+                    'REFERENCES', 'RESOURCES', 'APPENDIX', 'FOREWORD',
+                    'PREFACE', 'ACKNOWLEDGMENTS', 'ABOUT THE AUTHOR',
+                    'TABLE OF CONTENTS', 'INDEX'
+                ]:
+                    line = f'# {text}{trailing}'
+                    conversions += 1
+                # Level 2: Long bold headings (major section titles)
+                elif has_bold and len(text) > 35:
+                    line = f'## {text}{trailing}'
+                    conversions += 1
+                # Level 3: Medium and short bold headings (subsections)
+                elif has_bold and len(text) > 20:
+                    line = f'### {text}{trailing}'
+                    conversions += 1
+                elif has_bold:
+                    line = f'### {text}{trailing}'
+                    conversions += 1
+                # Level 4: Plain text headings (sub-subsections)
+                else:
+                    line = f'#### {text}{trailing}'
+                    conversions += 1
+
+            converted_lines.append(line)
+
+        if conversions > 0:
+            content = '\n'.join(converted_lines)
+            # Log the conversion (verbose mode)
+            print(f"     → Auto-converted {conversions} Calibre-style headings to markdown")
 
     # Remove excessive blank lines (more than 2 consecutive)
     content = re.sub(r'\n{3,}', '\n\n', content)
