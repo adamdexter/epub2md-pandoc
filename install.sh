@@ -125,6 +125,45 @@ install_pandoc() {
     print_success "Pandoc installed successfully"
 }
 
+# Check zenity installation (Linux only - for native folder dialogs)
+check_zenity() {
+    # Only needed on Linux - macOS uses built-in osascript
+    if [ "$OS" != "linux" ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "Checking zenity installation (for native folder dialogs)..."
+
+    if command -v zenity &> /dev/null; then
+        print_success "zenity is installed"
+        return 0
+    else
+        print_info "zenity is not installed (optional - enables native folder picker)"
+        return 1
+    fi
+}
+
+# Install zenity
+install_zenity() {
+    print_info "Installing zenity..."
+
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update
+        sudo apt-get install -y zenity
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y zenity
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y zenity
+    else
+        print_info "Could not install zenity automatically."
+        print_info "The GUI will use a built-in folder browser instead."
+        return 1
+    fi
+
+    print_success "zenity installed successfully"
+}
+
 # Create virtual environment and install Flask
 setup_venv() {
     echo ""
@@ -231,6 +270,17 @@ main() {
         else
             print_error "Pandoc is required. Exiting."
             exit 1
+        fi
+    fi
+
+    # Check and install zenity (Linux only - optional but recommended for native dialogs)
+    if ! check_zenity; then
+        read -p "Would you like to install zenity for native folder dialogs? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            install_zenity
+        else
+            print_info "Skipping zenity - GUI will use built-in folder browser"
         fi
     fi
 
