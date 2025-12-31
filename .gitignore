@@ -2,3 +2,10 @@
 ._.DS_Store
 **/.DS_Store
 **/._.DS_Store
+__pycache__/
+.venv/
+run_gui.sh
+run_gui.bat
+sample-epubs-for-testing/*.epub
+sample-epubs-for-testing/*.azw3
+test-output/
