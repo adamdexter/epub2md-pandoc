@@ -250,11 +250,21 @@ def apply_aggressive_cleanup(content: str, artifacts: dict, verbose: bool = Fals
 
     operations_run = []
 
-    # Priority 1: Remove ALL header attributes (AGGRESSIVE - handles all edge cases)
+    # Priority 1: Remove ALL header attributes (FIXED - handle Pandoc patterns)
     header_attrs_before = len(re.findall(r'^#{1,6}\s+.*\{', content, re.MULTILINE))
     if header_attrs_before > 0:
-        # Remove everything from { to end of line on header lines
+        # Handle Pandoc's []{#anchor}[Text]{.class} pattern first
+        # Convert: # []{#anchor}[Text]{.class} → # [Text]{.class}
+        content = re.sub(
+            r'^(#{1,6})\s+\[\]\{[^}]*\}(.+)$',
+            r'\1 \2',
+            content,
+            flags=re.MULTILINE
+        )
+
+        # Then remove all remaining {attribute} patterns
         content = re.sub(r'^(#{1,6}\s+.+?)\s*\{[^}]*\}.*$', r'\1', content, flags=re.MULTILINE)
+
         header_attrs_after = len(re.findall(r'^#{1,6}\s+.*\{', content, re.MULTILINE))
         if verbose and header_attrs_before > header_attrs_after:
             print(f"       → Removed {header_attrs_before - header_attrs_after} header attributes")
