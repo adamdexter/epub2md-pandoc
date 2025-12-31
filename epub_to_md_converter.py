@@ -15,7 +15,7 @@ import zipfile
 from datetime import datetime
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "2.2.1"  # Update this when making changes
+CONVERTER_VERSION = "2.2.2"  # Update this when making changes
 
 # EPUB Quality Pre-Check Configuration
 EPUB_QUALITY_THRESHOLD = 70.0  # Minimum quality score (0-100)
@@ -833,6 +833,8 @@ def convert_epub_to_md(epub_path: str, output_path: str,
         # ====================================================================
         # Some EPUBs use [TEXT]{.calibreX} instead of markdown headings.
         # Convert these EARLY so they're counted as proper headings in scoring.
+
+        import re  # Import here for regex operations
 
         if '{.calibre' in original_content:
             lines = original_content.split('\n')
