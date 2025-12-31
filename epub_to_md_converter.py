@@ -250,20 +250,20 @@ def apply_aggressive_cleanup(content: str, artifacts: dict, verbose: bool = Fals
 
     operations_run = []
 
-    # Priority 1: Remove header ID/class attributes
-    if artifacts['header_ids'] > 0:
-        before = len(re.findall(r'^#{1,6}\s+.*\{#[^}]*\}', content, re.MULTILINE))
-        content = re.sub(r'^(#{1,6}\s+.*?)\s*\{#[^}]*\}.*$', r'\1', content, flags=re.MULTILINE)
-        after = len(re.findall(r'^#{1,6}\s+.*\{#[^}]*\}', content, re.MULTILINE))
-        if verbose and before > after:
-            print(f"       → Removed {before - after} header IDs")
-        operations_run.append(f"header_ids: {before} → {after}")
+    # Priority 1: Remove ALL header attributes (FIXED - now handles {#id}, {.class}, and combined)
+    header_attrs_before = len(re.findall(r'^#{1,6}\s+.*\{[^}]*\}', content, re.MULTILINE))
+    if header_attrs_before > 0:
+        content = re.sub(r'^(#{1,6}\s+[^{]+?)\s*\{[^}]*\}\s*$', r'\1', content, flags=re.MULTILINE)
+        header_attrs_after = len(re.findall(r'^#{1,6}\s+.*\{[^}]*\}', content, re.MULTILINE))
+        if verbose and header_attrs_before > header_attrs_after:
+            print(f"       → Removed {header_attrs_before - header_attrs_after} header attributes")
+        operations_run.append(f"header_attrs: {header_attrs_before} → {header_attrs_after}")
 
-    # Priority 2: Remove HTML comment blocks
+    # Priority 2: Remove HTML comment blocks (FIXED - proper backtick escaping)
     if artifacts['html_blocks'] > 0:
-        before = len(re.findall(r'^`{2}\{=html\}$', content, re.MULTILINE))
-        content = re.sub(r'^`{2}\{=html\}$', '', content, flags=re.MULTILINE)
-        after = len(re.findall(r'^`{2}\{=html\}$', content, re.MULTILINE))
+        before = len(re.findall(r'^``\{=html\}$', content, re.MULTILINE))
+        content = re.sub(r'^``\{=html\}$', '', content, flags=re.MULTILINE)
+        after = len(re.findall(r'^``\{=html\}$', content, re.MULTILINE))
         if verbose and before > after:
             print(f"       → Removed {before - after} HTML blocks")
         operations_run.append(f"html_blocks: {before} → {after}")
@@ -271,7 +271,6 @@ def apply_aggressive_cleanup(content: str, artifacts: dict, verbose: bool = Fals
     # Priority 3: Simplify citation references
     if artifacts['citations'] > 0:
         before = len(re.findall(r'\[\[.*?\]\(#[^)]*\)\{\.biblioref[^}]*\}', content))
-        # [[text](#link){.biblioref}] → [text]
         content = re.sub(r'\[\[([^\]]*)\]\(#[^)]*\)\{[^}]*\}\]', r'[\1]', content)
         after = len(re.findall(r'\[\[.*?\]\(#[^)]*\)\{\.biblioref[^}]*\}', content))
         if verbose and before > after:
@@ -314,6 +313,38 @@ def apply_aggressive_cleanup(content: str, artifacts: dict, verbose: bool = Fals
         if verbose and before > after:
             print(f"       → Cleaned {before - after} blockquote divs")
         operations_run.append(f"blockquote_divs: {before} → {after}")
+
+    # Priority 8: Remove ghost headers (NEW - was missing)
+    ghost_headers_before = len(re.findall(r'^#{1,6}\s*\[\]\s*$', content, re.MULTILINE))
+    if ghost_headers_before > 0:
+        content = re.sub(r'^#{1,6}\s*\[\]\s*$', '', content, flags=re.MULTILINE)
+        ghost_headers_after = len(re.findall(r'^#{1,6}\s*\[\]\s*$', content, re.MULTILINE))
+        if verbose and ghost_headers_before > ghost_headers_after:
+            print(f"       → Removed {ghost_headers_before - ghost_headers_after} ghost headers")
+        operations_run.append(f"ghost_headers: {ghost_headers_before} → {ghost_headers_after}")
+
+    # Priority 9: Clean endnote/footnote references (NEW - was missing)
+    endnote_before = len(re.findall(r'\[\\\[\d+\\\]\]\([^)]*\)\{[^}]*\}', content))
+    if endnote_before > 0:
+        content = re.sub(
+            r'\[\\\[(\d+)\\\]\]\([^)]*\)\{[^}]*\}',
+            r'[\1]',
+            content
+        )
+        endnote_after = len(re.findall(r'\[\\\[\d+\\\]\]\([^)]*\)\{[^}]*\}', content))
+        if verbose and endnote_before > endnote_after:
+            print(f"       → Cleaned {endnote_before - endnote_after} endnote references")
+        operations_run.append(f"endnotes: {endnote_before} → {endnote_after}")
+
+    # Priority 10: Clean bracketed section numbers in headers (NEW - was missing)
+    before_section_nums = len(re.findall(r'^#{1,6}\s*\[[\d.]+\s*\]', content, re.MULTILINE))
+    if before_section_nums > 0:
+        content = re.sub(r'^(#{1,6}\s*)\[([\d.]+)\s*\]', r'\1\2. ', content, flags=re.MULTILINE)
+        if verbose:
+            print(f"       → Cleaned {before_section_nums} section number brackets")
+
+    # Clean up multiple consecutive blank lines (can accumulate from removals)
+    content = re.sub(r'\n{3,}', '\n\n', content)
 
     return content
 
