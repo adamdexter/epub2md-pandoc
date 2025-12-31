@@ -15,7 +15,7 @@ import zipfile
 from datetime import datetime
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "2.0.3"  # Update this when making changes
+CONVERTER_VERSION = "2.0.5"  # Update this when making changes
 
 def extract_epub_metadata(epub_path: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
@@ -528,6 +528,21 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
 
     # Remove "booksection" and similar class wrappers
     content = re.sub(r'^[ \t]*::: (?:booksection|section|chapter).*\n', '', content, flags=re.MULTILINE)
+
+    # ALWAYS remove HTML blocks (regardless of optimization score)
+    # This ensures HTML blocks are removed even when file scores > 85%
+    if '``{=html}' in content:
+        lines = content.split('\n')
+        cleaned_lines = []
+        removed_count = 0
+
+        for line in lines:
+            if line.strip() == '``{=html}':
+                removed_count += 1
+                continue
+            cleaned_lines.append(line)
+
+        content = '\n'.join(cleaned_lines)
 
     # Remove excessive blank lines (more than 2 consecutive)
     content = re.sub(r'\n{3,}', '\n\n', content)
