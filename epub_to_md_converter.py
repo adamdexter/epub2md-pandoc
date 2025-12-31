@@ -231,51 +231,89 @@ def calculate_optimization_score(artifacts: dict) -> float:
     return max(0.0, score)
 
 
-def apply_aggressive_cleanup(content: str, artifacts: dict) -> str:
+def apply_aggressive_cleanup(content: str, artifacts: dict, verbose: bool = False) -> str:
     """
     Apply aggressive cleanup operations for suboptimal EPUBs.
 
     This runs additional cleanup beyond the basic operations when
-    the optimization score is below 75%.
+    the optimization score is below 85%.
 
     Args:
         content: Markdown content
         artifacts: Artifact analysis results
+        verbose: Print detailed logging
 
     Returns:
         Cleaned content
     """
     import re
 
+    operations_run = []
+
     # Priority 1: Remove header ID/class attributes
     if artifacts['header_ids'] > 0:
+        before = len(re.findall(r'^#{1,6}\s+.*\{#[^}]*\}', content, re.MULTILINE))
         content = re.sub(r'^(#{1,6}\s+.*?)\s*\{#[^}]*\}.*$', r'\1', content, flags=re.MULTILINE)
+        after = len(re.findall(r'^#{1,6}\s+.*\{#[^}]*\}', content, re.MULTILINE))
+        if verbose and before > after:
+            print(f"       → Removed {before - after} header IDs")
+        operations_run.append(f"header_ids: {before} → {after}")
 
     # Priority 2: Remove HTML comment blocks
     if artifacts['html_blocks'] > 0:
+        before = len(re.findall(r'^`{2}\{=html\}$', content, re.MULTILINE))
         content = re.sub(r'^`{2}\{=html\}$', '', content, flags=re.MULTILINE)
+        after = len(re.findall(r'^`{2}\{=html\}$', content, re.MULTILINE))
+        if verbose and before > after:
+            print(f"       → Removed {before - after} HTML blocks")
+        operations_run.append(f"html_blocks: {before} → {after}")
 
     # Priority 3: Simplify citation references
     if artifacts['citations'] > 0:
+        before = len(re.findall(r'\[\[.*?\]\(#[^)]*\)\{\.biblioref[^}]*\}', content))
         # [[text](#link){.biblioref}] → [text]
         content = re.sub(r'\[\[([^\]]*)\]\(#[^)]*\)\{[^}]*\}\]', r'[\1]', content)
+        after = len(re.findall(r'\[\[.*?\]\(#[^)]*\)\{\.biblioref[^}]*\}', content))
+        if verbose and before > after:
+            print(f"       → Simplified {before - after} citations")
+        operations_run.append(f"citations: {before} → {after}")
 
     # Priority 4: Remove image attributes
     if artifacts['image_attrs'] > 0:
+        before = len(re.findall(r'!\[.*?\]\(.*?\)\{[^}]+\}', content))
         content = re.sub(r'(!\[[^\]]*\]\([^)]*\))\{[^}]*\}', r'\1', content)
+        after = len(re.findall(r'!\[.*?\]\(.*?\)\{[^}]+\}', content))
+        if verbose and before > after:
+            print(f"       → Cleaned {before - after} image attributes")
+        operations_run.append(f"image_attrs: {before} → {after}")
 
     # Priority 5: Remove bracketed text classes
     if artifacts['bracket_classes'] > 0:
+        before = len(re.findall(r'\[[^\]]+\]\{[^}]+\}', content))
         content = re.sub(r'(\[[^\]]+\])\{[^}]+\}', r'\1', content)
+        after = len(re.findall(r'\[[^\]]+\]\{[^}]+\}', content))
+        if verbose and before > after:
+            print(f"       → Cleaned {before - after} bracket classes")
+        operations_run.append(f"bracket_classes: {before} → {after}")
 
     # Priority 6: Clean internal XHTML links
     if artifacts['xhtml_links'] > 0:
+        before = len(re.findall(r'\[.*?\]\(#\d+_[^)]*\.xhtml[^)]*\)', content))
         content = re.sub(r'\[([^\]]*)\]\(#\d+_[^)]*\.xhtml[^)]*\)', r'[\1]', content)
+        after = len(re.findall(r'\[.*?\]\(#\d+_[^)]*\.xhtml[^)]*\)', content))
+        if verbose and before > after:
+            print(f"       → Cleaned {before - after} XHTML links")
+        operations_run.append(f"xhtml_links: {before} → {after}")
 
     # Priority 7: Clean blockquote divs
     if artifacts['blockquote_divs'] > 0:
+        before = len(re.findall(r'^> ::: \{\}$', content, re.MULTILINE))
         content = re.sub(r'^> ::: \{\}$', '', content, flags=re.MULTILINE)
         content = re.sub(r'^> :::$', '', content, flags=re.MULTILINE)
+        after = len(re.findall(r'^> ::: \{\}$', content, re.MULTILINE))
+        if verbose and before > after:
+            print(f"       → Cleaned {before - after} blockquote divs")
+        operations_run.append(f"blockquote_divs: {before} → {after}")
 
     return content
 
@@ -505,39 +543,56 @@ def convert_epub_to_md(epub_path: str, output_path: str,
 
         # Report artifact analysis
         total_artifacts = sum([artifacts[k] for k in artifacts.keys() if k != 'line_count'])
+
+        print(f"  📋 Total artifacts found: {total_artifacts}")
         if total_artifacts > 0:
-            print(f"  📋 Artifacts detected:")
+            print(f"     Details:")
             if artifacts['header_ids'] > 0:
-                print(f"     • Header IDs: {artifacts['header_ids']}")
+                print(f"       • Header IDs: {artifacts['header_ids']}")
             if artifacts['html_blocks'] > 0:
-                print(f"     • HTML blocks: {artifacts['html_blocks']}")
+                print(f"       • HTML blocks: {artifacts['html_blocks']}")
             if artifacts['citations'] > 0:
-                print(f"     • Citations: {artifacts['citations']}")
+                print(f"       • Citations: {artifacts['citations']}")
             if artifacts['image_attrs'] > 0:
-                print(f"     • Image attributes: {artifacts['image_attrs']}")
+                print(f"       • Image attributes: {artifacts['image_attrs']}")
             if artifacts['bracket_classes'] > 0:
-                print(f"     • Bracket classes: {artifacts['bracket_classes']}")
+                print(f"       • Bracket classes: {artifacts['bracket_classes']}")
             if artifacts['xhtml_links'] > 0:
-                print(f"     • XHTML links: {artifacts['xhtml_links']}")
+                print(f"       • XHTML links: {artifacts['xhtml_links']}")
             if artifacts['blockquote_divs'] > 0:
-                print(f"     • Blockquote divs: {artifacts['blockquote_divs']}")
+                print(f"       • Blockquote divs: {artifacts['blockquote_divs']}")
 
         print(f"  📈 Optimization score: {score:.1f}%")
+        print(f"  🎯 Threshold: 85% - {'SKIP cleanup' if score >= 85.0 else 'RUN cleanup'}")
 
         # Phase 2: Conditional cleanup with 85% threshold
         if score < 85.0:
-            print(f"  🧹 Cleanup required (< 85%) - Running aggressive cleanup...")
+            print(f"  🧹 Running aggressive cleanup (score < 85%)...")
+            print(f"     Step 1: Applying aggressive artifact removal...")
+
             # First apply aggressive cleanup for suboptimal EPUBs
-            cleaned_content = apply_aggressive_cleanup(original_content, artifacts)
+            cleaned_content = apply_aggressive_cleanup(original_content, artifacts, verbose=True)
+
+            # Check what aggressive cleanup did
+            mid_size = len(cleaned_content)
+            mid_reduction = ((original_size - mid_size) / original_size * 100) if original_size > 0 else 0
+            print(f"     Step 1 complete: {mid_reduction:.1f}% reduction")
+
+            print(f"     Step 2: Applying standard Claude optimizations...")
             # Then apply standard Claude optimizations
             cleaned_content = clean_markdown_for_claude(cleaned_content, title, author, year)
 
             # Re-analyze to show improvement
             post_artifacts = analyze_artifacts(cleaned_content)
             post_score = calculate_optimization_score(post_artifacts)
+            post_total = sum([post_artifacts[k] for k in post_artifacts.keys() if k != 'line_count'])
+
             print(f"  ✨ Post-cleanup score: {post_score:.1f}%")
+            print(f"  📉 Artifacts remaining: {post_total} (removed {total_artifacts - post_total})")
         else:
-            print(f"  ✅ Already optimal (≥ 85%) - Skipping cleanup, adding metadata only...")
+            print(f"  ✅ File already optimal (score ≥ 85%)")
+            print(f"  ⏭️  Skipping all cleanup operations")
+            print(f"  📝 Adding metadata header only...")
             # File is already clean - only add metadata, don't run cleanup
             cleaned_content = add_metadata_only(original_content, title, author, year)
 
