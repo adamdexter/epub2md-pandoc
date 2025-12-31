@@ -8,13 +8,16 @@ Automatically converts EPUB files to Markdown with AI-optimized filenames that i
 - 📖 **Extracts metadata** (title, author, year, edition) from EPUB files
 - 🤖 **AI-optimized filenames** without special characters (parentheses, brackets)
 - 🧹 **Claude-optimized markdown** - automatically cleans up for RAG performance
+- 🔍 **EPUB quality pre-check** - analyzes files BEFORE conversion to detect issues
+- 🔄 **Auto-converts Calibre headings** - fixes `[TEXT]{.calibre}` markers automatically
 - 🎯 **Smart artifact detection** - analyzes and scores files before cleanup
 - 📈 **Conditional cleanup** - only applies cleanup when needed (< 85% score)
 - 📝 **Proper heading hierarchy** using # ## ### syntax
-- 🎯 **Metadata headers** added to each file (YAML frontmatter)
+- 🎯 **Metadata headers** added to each file (YAML frontmatter with version tracking)
 - 🚫 **Removes 7 types of artifacts**: header IDs, HTML blocks, citations, etc.
 - 📊 **Detailed reporting** - shows artifacts found, scores, and improvements
 - 🔄 **Preserves optimal files** - skips unnecessary cleanup for clean EPUBs
+- ⚙️ **Configurable thresholds** - adjust quality requirements to your needs
 
 ## Filename Format
 
@@ -258,6 +261,132 @@ Before cleanup, the converter analyzes the markdown for 7 types of artifacts:
 🎯 Reduced by: 38.4%
 📑 Headings found: 142
 🎉 Ready for Claude Projects!
+```
+
+## Automatic Calibre Heading Conversion
+
+The converter automatically detects and fixes EPUBs with **Calibre-style heading markers** that prevent proper heading detection.
+
+### The Problem
+
+Some EPUB files (especially older Calibre conversions) use styled text markers instead of proper markdown headings:
+
+```markdown
+[**CHAPTER 1**]{.calibre3}
+[**THE FOUNDATION FOR COACHING**]{.calibre3}
+[Getting Started]{.calibre5}
+```
+
+These appear as regular text instead of headings, making the document hard to navigate.
+
+### Automatic Detection
+
+The pre-check system detects these patterns and recognizes them as **fixable issues**:
+
+```
+🔍 Running quality pre-check...
+   Quality Score: 85.0% (threshold: 70.0%)
+   Issues detected:
+     • Fixable: 166 Calibre-style markers detected (will auto-convert to headings)
+   ⚠️  Issues detected but above threshold - proceeding
+```
+
+### Automatic Conversion
+
+The converter automatically transforms Calibre markers into proper markdown headings:
+
+**Before:**
+```markdown
+[**CHAPTER 1**]{.calibre3}
+[**THE FOUNDATION FOR COACHING**]{.calibre3}
+[**Exploring the Landscape**]{.calibre5}
+[Getting Started]{.calibre7}
+```
+
+**After:**
+```markdown
+# CHAPTER 1
+## THE FOUNDATION FOR COACHING
+### Exploring the Landscape
+#### Getting Started
+```
+
+### Smart Level Detection
+
+Heading levels are determined automatically:
+- **Level 1 (#)**: CHAPTER, PART, INTRODUCTION, major sections
+- **Level 2 (##)**: Long bold headings (>35 characters)
+- **Level 3 (###)**: Medium/short bold headings (>20 characters)
+- **Level 4 (####)**: Plain text headings
+
+### Conversion Output
+
+```
+🔍 Analyzing artifacts...
+   → Auto-converted 166 Calibre-style headings to markdown
+📈 Optimization score: 85.7%
+✅ File already optimal (score ≥ 85%)
+📊 File size: 424.3 KB
+📑 Headings found: 166 ← Properly converted!
+🎉 Ready for Claude Projects!
+```
+
+### No Manual Steps Required
+
+The conversion happens **automatically** during processing - no manual intervention needed!
+
+## EPUB Quality Pre-Check
+
+The converter includes a smart pre-check system that analyzes EPUBs **before conversion** to detect potential issues:
+
+### Quality Assessment
+
+Before converting, each EPUB is scored based on:
+- **Missing headings** (critical structural issue)
+- **Heavy HTML artifacts** (formatting noise)
+- **Role attributes** and other metadata bloat
+- **Calibre-style markers** (auto-fixable)
+
+### Smart Recommendations
+
+Files are categorized and handled appropriately:
+
+**Good Quality (≥70%):**
+```
+🔍 Running quality pre-check...
+   Quality Score: 95.3% (threshold: 70.0%)
+   ✓ Quality check passed
+
+🔄 Converting EPUB to Markdown...
+```
+
+**Auto-Fixable Issues:**
+```
+🔍 Running quality pre-check...
+   Quality Score: 85.0% (threshold: 70.0%)
+   Issues detected:
+     • Fixable: 166 Calibre-style markers detected (will auto-convert to headings)
+   ⚠️  Issues detected but above threshold - proceeding
+```
+
+**Critical Issues:**
+```
+🔍 Running quality pre-check...
+   Quality Score: 60.0% (threshold: 70.0%)
+   Issues detected:
+     • CRITICAL: Zero headings detected in 4395 lines
+     • No auto-fix patterns found
+
+⚠️  QUALITY BELOW THRESHOLD - SKIPPING
+   💡 Tip: Manual intervention may be needed
+```
+
+### Configurable Behavior
+
+Adjust the threshold in the script:
+```python
+EPUB_QUALITY_THRESHOLD = 70.0  # Lower = more lenient
+SKIP_LOW_QUALITY_EPUBS = True   # Set False to disable pre-check
 ```
 
 ## Claude Project Knowledge Optimization
