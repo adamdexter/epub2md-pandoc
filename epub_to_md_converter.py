@@ -15,7 +15,12 @@ import zipfile
 from datetime import datetime
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "2.0.5"  # Update this when making changes
+CONVERTER_VERSION = "2.1.0"  # Update this when making changes
+
+# EPUB Quality Pre-Check Configuration
+EPUB_QUALITY_THRESHOLD = 70.0  # Minimum quality score (0-100)
+SKIP_LOW_QUALITY_EPUBS = True  # Set to False to disable pre-check
+ALLOW_QUALITY_OVERRIDE = True  # Allow user to override skip decision
 
 def extract_epub_metadata(epub_path: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
@@ -205,6 +210,157 @@ def analyze_artifacts(content: str) -> dict:
     }
 
     return artifacts
+
+
+def assess_epub_quality(epub_path: str) -> dict:
+    """
+    Pre-conversion EPUB quality assessment.
+
+    Runs a quick Pandoc conversion to temporary file and analyzes structure
+    and artifacts to predict final quality before full conversion.
+
+    Returns:
+        dict with:
+            - score: float (0-100)
+            - issues: list of str (detected problems)
+            - recommendation: str ('proceed', 'skip', 'review')
+            - details: dict (detailed metrics)
+    """
+    import tempfile
+    import os
+    import subprocess
+
+    # Create temporary file for test conversion
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        # Quick Pandoc conversion (minimal options for speed)
+        cmd = [
+            'pandoc',
+            str(epub_path),
+            '-o', tmp_path,
+            '--to=markdown',
+            '--wrap=none'
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
+
+        if result.returncode != 0:
+            return {
+                'score': 0.0,
+                'issues': ['Pandoc conversion failed'],
+                'recommendation': 'skip',
+                'details': {'error': result.stderr}
+            }
+
+        # Read and analyze the temporary conversion
+        with open(tmp_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Analyze structure and artifacts
+        lines = content.split('\n')
+        line_count = len(lines)
+
+        # Count potential issues
+        heading_count = len([l for l in lines if l.strip().startswith('#')])
+        html_blocks = content.count('``{=html}')
+
+        # Check for styled text that should be headings (HeART book pattern)
+        calibre_markers = len([l for l in lines if '{.calibre' in l and l.strip().startswith('[')])
+
+        # Check for ALL-CAPS lines (potential undetected headings)
+        caps_lines = len([l for l in lines if l.strip() and len(l.strip()) > 10 and
+                         l.strip().isupper() and not l.strip().startswith('#')])
+
+        # Count artifacts
+        header_attrs = len([l for l in lines if l.strip().startswith('#') and '{' in l])
+        role_attrs = content.count('role=')
+        bracket_classes = len(re.findall(r'\[[^\]]+\]\{[^}]+\}', content))
+
+        # Calculate metrics
+        issues = []
+        details = {
+            'lines': line_count,
+            'headings': heading_count,
+            'html_blocks': html_blocks,
+            'calibre_markers': calibre_markers,
+            'caps_lines': caps_lines,
+            'header_attrs': header_attrs,
+            'role_attrs': role_attrs,
+            'bracket_classes': bracket_classes
+        }
+
+        # Assess quality
+        score = 100.0
+
+        # Issue 1: Missing headings (critical - structure problem)
+        if line_count > 1000 and heading_count == 0:
+            issues.append(f"CRITICAL: Zero headings detected in {line_count} lines")
+            score -= 40.0
+
+            # Check for undetected heading patterns
+            if calibre_markers > 50:
+                issues.append(f"Found {calibre_markers} Calibre-style markers - needs heading conversion")
+            elif caps_lines > 30:
+                issues.append(f"Found {caps_lines} ALL-CAPS lines - possible undetected headings")
+        elif line_count > 1000 and heading_count < 10:
+            issues.append(f"WARNING: Only {heading_count} headings in {line_count} lines")
+            score -= 20.0
+
+        # Issue 2: Heavy inline HTML artifacts (Coaching book pattern)
+        if html_blocks > 200:
+            issues.append(f"MAJOR: {html_blocks} HTML blocks detected")
+            score -= 25.0
+        elif html_blocks > 100:
+            issues.append(f"WARNING: {html_blocks} HTML blocks")
+            score -= 15.0
+
+        # Issue 3: Heavy role attributes
+        if role_attrs > 50:
+            issues.append(f"WARNING: {role_attrs} role attributes")
+            score -= 10.0
+
+        # Issue 4: Heavy bracket classes
+        if bracket_classes > 500:
+            issues.append(f"WARNING: {bracket_classes} bracket classes")
+            score -= 10.0
+
+        score = max(0.0, score)
+
+        # Make recommendation
+        if score >= 80:
+            recommendation = 'proceed'
+        elif score >= EPUB_QUALITY_THRESHOLD:
+            recommendation = 'proceed'
+        else:
+            recommendation = 'skip'
+
+        return {
+            'score': score,
+            'issues': issues,
+            'recommendation': recommendation,
+            'details': details
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            'score': 0.0,
+            'issues': ['Conversion timeout - file may be corrupt'],
+            'recommendation': 'skip',
+            'details': {}
+        }
+    except Exception as e:
+        return {
+            'score': 0.0,
+            'issues': [f'Assessment error: {str(e)}'],
+            'recommendation': 'skip',
+            'details': {}
+        }
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def calculate_optimization_score(artifacts: dict) -> float:
@@ -583,6 +739,55 @@ def convert_epub_to_md(epub_path: str, output_path: str,
     Returns:
         True if conversion successful, False otherwise
     """
+    # ========================================================================
+    # EPUB QUALITY PRE-CHECK (NEW - DO NOT MODIFY EXISTING CODE BELOW)
+    # ========================================================================
+
+    if SKIP_LOW_QUALITY_EPUBS:
+        print(f"  🔍 Running quality pre-check...")
+        assessment = assess_epub_quality(epub_path)
+
+        score = assessment['score']
+        issues = assessment['issues']
+        recommendation = assessment['recommendation']
+
+        print(f"     Quality Score: {score:.1f}% (threshold: {EPUB_QUALITY_THRESHOLD}%)")
+
+        if issues:
+            print(f"     Issues detected:")
+            for issue in issues:
+                print(f"       • {issue}")
+
+        if recommendation == 'skip':
+            print(f"  ⚠️  QUALITY BELOW THRESHOLD - SKIPPING")
+            print(f"     Detected issues:")
+            for issue in issues:
+                print(f"       • {issue}")
+
+            # Show detailed metrics
+            details = assessment['details']
+            if details.get('calibre_markers', 0) > 50:
+                print(f"     💡 Tip: This EPUB may need heading conversion script")
+                print(f"        ({details['calibre_markers']} Calibre-style markers found)")
+
+            if ALLOW_QUALITY_OVERRIDE:
+                print(f"\n     To process anyway, set SKIP_LOW_QUALITY_EPUBS = False")
+                print(f"     or adjust EPUB_QUALITY_THRESHOLD (current: {EPUB_QUALITY_THRESHOLD}%)")
+
+            return False  # Skip this file
+
+        elif recommendation == 'proceed':
+            if issues:
+                print(f"     ⚠️  Issues detected but above threshold - proceeding")
+            else:
+                print(f"     ✓ Quality check passed")
+
+        print()  # Blank line before conversion starts
+
+    # ========================================================================
+    # EXISTING CONVERSION CODE CONTINUES HERE (UNCHANGED)
+    # ========================================================================
+
     try:
         # Create output directory if it doesn't exist
         output_dir = os.path.dirname(output_path)
