@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.12"  # 1.0.12 adds undetected-chromedriver support for Cloudflare bypass
+CONVERTER_VERSION = "1.0.13"  # 1.0.13 fixes Medium bugs, adds debug logging
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -58,11 +58,14 @@ except ImportError:
 
 # Try undetected-chromedriver first (best for bypassing Cloudflare)
 UNDETECTED_CHROME_AVAILABLE = False
+UNDETECTED_CHROME_ERROR = None
 try:
     import undetected_chromedriver as uc
     UNDETECTED_CHROME_AVAILABLE = True
-except ImportError:
-    pass
+except ImportError as e:
+    UNDETECTED_CHROME_ERROR = f"ImportError: {e}"
+except Exception as e:
+    UNDETECTED_CHROME_ERROR = f"Error: {e}"
 
 # Fall back to regular Selenium
 SELENIUM_AVAILABLE = False
@@ -1714,7 +1717,8 @@ def setup_medium_driver(headless: bool = False):
     # Try undetected-chromedriver first (best for Cloudflare bypass)
     if UNDETECTED_CHROME_AVAILABLE:
         try:
-            print("      Using undetected-chromedriver (Cloudflare bypass)")
+            print("      Using undetected-chromedriver (Cloudflare bypass mode)")
+            print(f"      [DEBUG] undetected-chromedriver version: {getattr(uc, '__version__', 'unknown')}")
 
             # Create dedicated profile directory for persistence
             os.makedirs(MEDIUM_PROFILE_DIR, exist_ok=True)
@@ -1745,6 +1749,11 @@ def setup_medium_driver(headless: bool = False):
         except Exception as e:
             print(f"      undetected-chromedriver failed: {e}")
             print("      Falling back to regular Selenium...")
+
+    # Show why undetected-chromedriver isn't being used
+    if not UNDETECTED_CHROME_AVAILABLE:
+        print(f"      [DEBUG] undetected-chromedriver not available: {UNDETECTED_CHROME_ERROR}")
+        print("      Falling back to regular Selenium (may be detected by Cloudflare)")
 
     # Fall back to regular Selenium
     if not SELENIUM_AVAILABLE:
@@ -1910,10 +1919,13 @@ def medium_manual_login(driver) -> bool:
         timeout = MEDIUM_MANUAL_LOGIN_TIMEOUT
 
         while time.time() - start_time < timeout:
-            current_url = driver.current_url
+            try:
+                current_url = driver.current_url or ""
+            except:
+                current_url = ""
 
             # Check if user has navigated away from login pages
-            if '/signin' not in current_url and '/login' not in current_url:
+            if current_url and '/signin' not in current_url and '/login' not in current_url:
                 # Verify we're actually logged in
                 time.sleep(2)
                 if check_medium_login_status(driver):
@@ -2111,24 +2123,19 @@ def convert_url_to_markdown(
     # Step 2: Extract metadata from multiple sources
     print("\n[2/6] Extracting metadata...")
 
-    # If we have Medium RSS metadata, use it as primary source
-    if medium_rss_metadata:
-        metadata = medium_rss_metadata.copy()
-        tags = medium_rss_tags or []
-        print(f"      (Using metadata from Medium RSS)")
-    else:
-        json_ld_meta = extract_json_ld_metadata(html_content)
-        og_meta = extract_opengraph_metadata(html_content)
-        spa_meta = extract_spa_metadata(html_content, url)  # SPA-specific extraction
-        html_meta = extract_html_metadata(html_content, url)
+    # Extract metadata from multiple sources
+    json_ld_meta = extract_json_ld_metadata(html_content)
+    og_meta = extract_opengraph_metadata(html_content)
+    spa_meta = extract_spa_metadata(html_content, url)  # SPA-specific extraction
+    html_meta = extract_html_metadata(html_content, url)
 
-        # Merge metadata (priority: JSON-LD > OpenGraph > SPA > HTML)
-        metadata = merge_metadata(json_ld_meta, og_meta, spa_meta, html_meta)
+    # Merge metadata (priority: JSON-LD > OpenGraph > SPA > HTML)
+    metadata = merge_metadata(json_ld_meta, og_meta, spa_meta, html_meta)
 
-        # Extract tags/topics (also check SPA metadata for tags)
-        tags = extract_tags_and_topics(html_content)
-        if not tags and 'tags' in spa_meta:
-            tags = spa_meta['tags']
+    # Extract tags/topics (also check SPA metadata for tags)
+    tags = extract_tags_and_topics(html_content)
+    if not tags and 'tags' in spa_meta:
+        tags = spa_meta['tags']
 
     print(f"      Title: {metadata.get('title', 'Not found')}")
     print(f"      Author: {metadata.get('author', 'Not found')}")
