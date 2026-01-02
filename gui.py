@@ -6,12 +6,47 @@ A simple Flask-based web interface for the EPUB converter.
 
 import os
 import sys
+import json
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify
 from epub_to_md_converter import process_folder, check_pandoc_installed
 import threading
 import queue
 import io
+
+# Preferences file location (in user's home directory)
+PREFERENCES_FILE = os.path.join(os.path.expanduser('~'), '.epub2md_preferences.json')
+
+
+def get_downloads_folder():
+    """Get the user's Downloads folder path (cross-platform)"""
+    home = Path.home()
+    downloads = home / "Downloads"
+    if downloads.exists():
+        return str(downloads)
+    return str(home)
+
+
+def load_preferences():
+    """Load user preferences from file"""
+    try:
+        if os.path.exists(PREFERENCES_FILE):
+            with open(PREFERENCES_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Error loading preferences: {e}")
+    return {}
+
+
+def save_preferences(prefs):
+    """Save user preferences to file"""
+    try:
+        with open(PREFERENCES_FILE, 'w') as f:
+            json.dump(prefs, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving preferences: {e}")
+        return False
 
 app = Flask(__name__)
 
@@ -162,6 +197,196 @@ def browse_folder():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 400
+
+
+@app.route('/get_preferences')
+def get_preferences():
+    """Get saved preferences or defaults"""
+    prefs = load_preferences()
+    downloads = get_downloads_folder()
+
+    return jsonify({
+        'input_folder': prefs.get('input_folder', downloads),
+        'output_folder': prefs.get('output_folder', downloads),
+        'has_saved_prefs': bool(prefs)
+    })
+
+
+@app.route('/save_preferences', methods=['POST'])
+def save_prefs():
+    """Save user preferences"""
+    data = request.json
+    prefs = load_preferences()
+
+    if 'input_folder' in data:
+        prefs['input_folder'] = data['input_folder']
+    if 'output_folder' in data:
+        prefs['output_folder'] = data['output_folder']
+
+    success = save_preferences(prefs)
+    return jsonify({'success': success})
+
+
+@app.route('/upload_file', methods=['POST'])
+def upload_file():
+    """Handle file upload from drag and drop"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided', 'success': False}), 400
+
+    file = request.files['file']
+    target_folder = request.form.get('target_folder', '')
+
+    if not file.filename:
+        return jsonify({'error': 'No file selected', 'success': False}), 400
+
+    if not target_folder:
+        return jsonify({'error': 'No target folder specified', 'success': False}), 400
+
+    # Validate file extension
+    if not file.filename.lower().endswith('.epub'):
+        return jsonify({'error': 'Only EPUB files are allowed', 'success': False}), 400
+
+    try:
+        # Expand and validate target folder
+        target_folder = os.path.expanduser(target_folder)
+
+        # Create folder if it doesn't exist
+        if not os.path.exists(target_folder):
+            os.makedirs(target_folder)
+
+        # Save file
+        file_path = os.path.join(target_folder, file.filename)
+        file.save(file_path)
+
+        return jsonify({
+            'success': True,
+            'path': file_path,
+            'filename': file.filename
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e), 'success': False}), 500
+
+
+def open_folder_dialog_native(initial_dir, title):
+    """
+    Try to open a native folder dialog using various methods.
+    Returns (path, success, error_message)
+    """
+    import subprocess
+    import shutil
+
+    # Ensure initial_dir exists
+    initial_dir = os.path.expanduser(initial_dir)
+    if not os.path.exists(initial_dir):
+        initial_dir = get_downloads_folder()
+
+    # Method 1: Try tkinter
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+
+        folder_path = filedialog.askdirectory(
+            initialdir=initial_dir,
+            title=title
+        )
+        root.destroy()
+
+        if folder_path:
+            return folder_path, True, None
+        else:
+            return '', False, None  # User cancelled
+    except ImportError:
+        pass  # tkinter not available, try next method
+    except Exception as e:
+        pass  # tkinter failed, try next method
+
+    # Method 2: Try zenity (Linux/GNOME)
+    if shutil.which('zenity'):
+        try:
+            result = subprocess.run(
+                ['zenity', '--file-selection', '--directory',
+                 '--title=' + title, '--filename=' + initial_dir + '/'],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip(), True, None
+            elif result.returncode == 1:
+                return '', False, None  # User cancelled
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # Method 3: Try kdialog (Linux/KDE)
+    if shutil.which('kdialog'):
+        try:
+            result = subprocess.run(
+                ['kdialog', '--getexistingdirectory', initial_dir, '--title', title],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip(), True, None
+            elif result.returncode == 1:
+                return '', False, None  # User cancelled
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # Method 4: Try osascript (macOS)
+    if shutil.which('osascript'):
+        try:
+            script = f'''
+            set folderPath to POSIX path of (choose folder with prompt "{title}" default location POSIX file "{initial_dir}")
+            return folderPath
+            '''
+            result = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().rstrip('/'), True, None
+            elif result.returncode == 1:
+                return '', False, None  # User cancelled
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # No native dialog method available
+    return '', False, 'No native dialog tool available (install zenity, kdialog, or tkinter)'
+
+
+@app.route('/native_folder_dialog', methods=['POST'])
+def native_folder_dialog():
+    """Open native folder picker dialog using best available method"""
+    data = request.json
+    initial_dir = data.get('initial_dir', get_downloads_folder())
+    title = data.get('title', 'Select Folder')
+
+    path, success, error = open_folder_dialog_native(initial_dir, title)
+
+    if error:
+        return jsonify({
+            'error': error,
+            'selected': False
+        }), 500
+
+    return jsonify({
+        'path': path,
+        'selected': success
+    })
 
 
 def main():

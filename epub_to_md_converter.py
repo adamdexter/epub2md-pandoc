@@ -15,7 +15,7 @@ import zipfile
 from datetime import datetime
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "2.2.2"  # Update this when making changes
+CONVERTER_VERSION = "2.3.0"  # Update this when making changes
 
 # EPUB Quality Pre-Check Configuration
 EPUB_QUALITY_THRESHOLD = 70.0  # Minimum quality score (0-100)

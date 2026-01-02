@@ -329,6 +329,76 @@
         .close-btn:hover {
             color: #333;
         }
+
+        /* Drag and Drop Zone */
+        .drop-zone {
+            border: 3px dashed #ccc;
+            border-radius: 12px;
+            padding: 40px 20px;
+            text-align: center;
+            margin-bottom: 25px;
+            transition: all 0.3s ease;
+            background: #fafafa;
+        }
+
+        .drop-zone.drag-over {
+            border-color: #667eea;
+            background: rgba(102, 126, 234, 0.1);
+        }
+
+        .drop-zone-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+            opacity: 0.6;
+        }
+
+        .drop-zone-text {
+            font-size: 1.1em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .drop-zone-subtext {
+            font-size: 0.9em;
+            color: #999;
+        }
+
+        .dropped-files {
+            margin-top: 15px;
+            text-align: left;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        .dropped-file {
+            padding: 8px 12px;
+            background: #e8f4e8;
+            border-radius: 6px;
+            margin-bottom: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .dropped-file-name {
+            font-size: 0.9em;
+            color: #333;
+        }
+
+        .remove-file {
+            background: none;
+            border: none;
+            color: #dc3545;
+            cursor: pointer;
+            font-size: 1.2em;
+            padding: 0 5px;
+        }
+
+        .copy-btn {
+            padding: 8px 16px;
+            font-size: 0.9em;
+            margin-left: 10px;
+        }
     </style>
 </head>
 <body>
@@ -336,13 +406,21 @@
         <div class="header">
             <h1>📚 EPUB to Markdown Converter</h1>
             <p>Convert your EPUB books to AI-optimized Markdown files</p>
-            <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px;">Version 2.2.2 - Import Fix</p>
+            <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px;">Version 2.3.0 - GUI Improvements</p>
         </div>
 
         <div class="content">
             <div id="pandoc-warning" class="warning">
                 <strong>⚠️ Warning:</strong> Pandoc is not installed. Please install it first:
                 <a href="https://pandoc.org/installing.html" target="_blank">https://pandoc.org/installing.html</a>
+            </div>
+
+            <!-- Drag and Drop Zone -->
+            <div id="drop-zone" class="drop-zone">
+                <div class="drop-zone-icon">📚</div>
+                <div class="drop-zone-text">Drag & Drop EPUB files here</div>
+                <div class="drop-zone-subtext">Files will be copied to your input folder for conversion</div>
+                <div id="dropped-files" class="dropped-files"></div>
             </div>
 
             <form id="converter-form">
@@ -372,9 +450,14 @@
             <div id="progress-container" class="progress-container">
                 <div class="progress-header">
                     <h3>Conversion Progress</h3>
-                    <span id="status-badge" class="status-badge status-running">
-                        <span class="spinner"></span> Running...
-                    </span>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span id="status-badge" class="status-badge status-running">
+                            <span class="spinner"></span> Running...
+                        </span>
+                        <button type="button" class="btn btn-secondary copy-btn" onclick="copyLogs()" title="Copy logs to clipboard">
+                            Copy Logs
+                        </button>
+                    </div>
                 </div>
                 <div class="progress-log" id="progress-log">
                     <p>Starting conversion...</p>
@@ -412,9 +495,11 @@
     <script>
         let currentBrowseTarget = 'input';
         let currentPath = '';
+        let nativeDialogAvailable = true;
 
-        // Check Pandoc installation on page load
+        // Check Pandoc installation and load preferences on page load
         window.addEventListener('DOMContentLoaded', async () => {
+            // Check Pandoc
             try {
                 const response = await fetch('/check_pandoc');
                 const data = await response.json();
@@ -426,7 +511,37 @@
             } catch (error) {
                 console.error('Error checking Pandoc:', error);
             }
+
+            // Load saved preferences
+            try {
+                const response = await fetch('/get_preferences');
+                const prefs = await response.json();
+
+                // Set input folder (to saved value or Downloads folder)
+                document.getElementById('input-folder').value = prefs.input_folder || '';
+
+                // Set output folder (to saved value or Downloads folder)
+                document.getElementById('output-folder').value = prefs.output_folder || 'md processed books';
+            } catch (error) {
+                console.error('Error loading preferences:', error);
+            }
         });
+
+        // Save preferences when folders change
+        async function savePreferences() {
+            try {
+                await fetch('/save_preferences', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        input_folder: document.getElementById('input-folder').value,
+                        output_folder: document.getElementById('output-folder').value
+                    })
+                });
+            } catch (error) {
+                console.error('Error saving preferences:', error);
+            }
+        }
 
         // Handle form submission
         document.getElementById('converter-form').addEventListener('submit', async (e) => {
@@ -468,6 +583,9 @@
                     document.getElementById('convert-btn').innerHTML = 'Convert EPUBs to Markdown';
                     return;
                 }
+
+                // Save preferences for next time
+                savePreferences();
 
                 // Poll for status updates
                 pollStatus();
@@ -512,14 +630,48 @@
             }
         }
 
-        // Browse folder
+        // Browse folder - try native dialog first, fall back to modal browser
         async function browseFolder(target) {
             currentBrowseTarget = target;
-
-            // Get current path from input or use home directory
             const inputField = document.getElementById(target + '-folder');
             const initialPath = inputField.value || '~';
+            const dialogTitle = target === 'input' ? 'Select Input Folder' : 'Select Output Folder';
 
+            // Try native dialog first
+            if (nativeDialogAvailable) {
+                try {
+                    const response = await fetch('/native_folder_dialog', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            initial_dir: initialPath,
+                            title: dialogTitle
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok && data.selected) {
+                        // User selected a folder
+                        inputField.value = data.path;
+                        savePreferences();
+                        return;
+                    } else if (response.ok && !data.selected) {
+                        // User cancelled native dialog, do nothing
+                        return;
+                    } else if (!response.ok) {
+                        // Server error (500) - native dialog not available
+                        console.log('Native dialog not available:', data.error);
+                        nativeDialogAvailable = false;
+                        // Continue to fallback modal below
+                    }
+                } catch (error) {
+                    console.error('Native dialog error:', error);
+                    nativeDialogAvailable = false;
+                }
+            }
+
+            // Fall back to modal browser
             await loadFolder(initialPath);
             document.getElementById('folder-modal').classList.add('show');
         }
@@ -583,12 +735,6 @@
             }
         }
 
-        // Select folder
-        function selectFolder(path) {
-            document.getElementById(currentBrowseTarget + '-folder').value = path;
-            closeFolderBrowser();
-        }
-
         // Close folder browser
         function closeFolderBrowser() {
             document.getElementById('folder-modal').classList.remove('show');
@@ -600,6 +746,151 @@
                 closeFolderBrowser();
             }
         });
+
+        // Save preferences when folder is selected in modal
+        function selectFolder(path) {
+            document.getElementById(currentBrowseTarget + '-folder').value = path;
+            closeFolderBrowser();
+            savePreferences();
+        }
+
+        // ========== Drag and Drop Support ==========
+        let droppedFiles = [];
+
+        const dropZone = document.getElementById('drop-zone');
+        const droppedFilesContainer = document.getElementById('dropped-files');
+
+        // Prevent default drag behaviors on the whole page
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            document.body.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        // Highlight drop zone when dragging over it
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, () => {
+                dropZone.classList.add('drag-over');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, () => {
+                dropZone.classList.remove('drag-over');
+            }, false);
+        });
+
+        // Handle dropped files
+        dropZone.addEventListener('drop', handleDrop, false);
+
+        async function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = [...dt.files];
+
+            // Filter only .epub files
+            const epubFiles = files.filter(file => file.name.toLowerCase().endsWith('.epub'));
+
+            if (epubFiles.length === 0) {
+                alert('Please drop EPUB files only (.epub extension)');
+                return;
+            }
+
+            // Upload files to input folder
+            const inputFolder = document.getElementById('input-folder').value;
+            if (!inputFolder) {
+                alert('Please select an input folder first');
+                return;
+            }
+
+            for (const file of epubFiles) {
+                await uploadFile(file, inputFolder);
+            }
+
+            updateDroppedFilesDisplay();
+        }
+
+        async function uploadFile(file, targetFolder) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('target_folder', targetFolder);
+
+            try {
+                const response = await fetch('/upload_file', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    droppedFiles.push({
+                        name: file.name,
+                        path: data.path
+                    });
+                } else {
+                    alert('Error uploading ' + file.name + ': ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error uploading ' + file.name + ': ' + error);
+            }
+        }
+
+        function updateDroppedFilesDisplay() {
+            droppedFilesContainer.innerHTML = '';
+
+            if (droppedFiles.length === 0) {
+                return;
+            }
+
+            droppedFiles.forEach((file, index) => {
+                const div = document.createElement('div');
+                div.className = 'dropped-file';
+                div.innerHTML = `
+                    <span class="dropped-file-name">📖 ${file.name}</span>
+                    <button class="remove-file" onclick="removeDroppedFile(${index})" title="Remove file">&times;</button>
+                `;
+                droppedFilesContainer.appendChild(div);
+            });
+        }
+
+        function removeDroppedFile(index) {
+            droppedFiles.splice(index, 1);
+            updateDroppedFilesDisplay();
+        }
+
+        // ========== Copy Logs Function ==========
+        async function copyLogs() {
+            const logContainer = document.getElementById('progress-log');
+            const logText = logContainer.innerText;
+
+            try {
+                await navigator.clipboard.writeText(logText);
+
+                // Visual feedback
+                const copyBtn = document.querySelector('.copy-btn');
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = 'Copied!';
+                copyBtn.style.background = '#28a745';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                    copyBtn.style.background = '';
+                }, 2000);
+            } catch (error) {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = logText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+
+                alert('Logs copied to clipboard!');
+            }
+        }
     </script>
 </body>
 </html>
