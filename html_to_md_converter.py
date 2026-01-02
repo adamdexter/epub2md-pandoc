@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.15"  # 1.0.15 fixes login detection to not navigate away from current page
+CONVERTER_VERSION = "1.0.16"  # 1.0.16 fixes distutils shim for Python 3.12/3.13
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -55,6 +55,22 @@ try:
     BS4_AVAILABLE = True
 except ImportError:
     pass
+
+# Python 3.12+ removed distutils - set up compatibility shim before importing undetected-chromedriver
+import sys
+if 'distutils' not in sys.modules:
+    try:
+        # Try to use setuptools' bundled distutils
+        from setuptools import _distutils_hack
+        _distutils_hack.add_shim()
+    except (ImportError, AttributeError):
+        try:
+            # Alternative: manually add the shim
+            import setuptools._distutils as _distutils
+            sys.modules['distutils'] = _distutils
+            sys.modules['distutils.version'] = _distutils.version
+        except (ImportError, AttributeError):
+            pass
 
 # Try undetected-chromedriver first (best for bypassing Cloudflare)
 UNDETECTED_CHROME_AVAILABLE = False
