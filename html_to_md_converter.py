@@ -497,40 +497,47 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
         # Medium-specific: Look for "Written by [Name]" pattern
         # This is needed because Medium's article:author meta tag contains a URL, not the display name
         if is_medium_url(url):
-            # Pattern A: Find "Written by" text and get the adjacent name
-            written_by = soup.find(string=re.compile(r'Written by', re.I))
+            # Pattern A: Find "Written by" text and get the name from the SAME parent container
+            written_by = soup.find(string=re.compile(r'^Written by$', re.I))
             if written_by:
+                # Get the immediate parent and look for the name within it
                 parent = written_by.find_parent()
                 if parent:
-                    # The name is usually in a sibling or nearby element
-                    for elem in parent.find_all_next(['a', 'span', 'div', 'h4', 'p'], limit=5):
-                        text = elem.get_text(strip=True)
-                        # Skip "Written by" itself and follower counts
-                        if text and 'Written by' not in text and not re.match(r'^\d+[KkMm]?\s*(followers?)?', text):
-                            # Check if it looks like a name (has multiple words or starts with capital)
-                            if re.match(r'^[A-Z][a-z]+(\s+[A-Z])?', text) and len(text) > 2 and len(text) < 60:
-                                # Skip if it looks like a publication name or date
-                                if not re.match(r'^(Published|Last|in|Founder|CEO|Follow)', text, re.I):
+                    # Go up to find the author card container (usually a div or section)
+                    author_card = parent.find_parent(['div', 'section', 'li'])
+                    if author_card:
+                        # Look for links that contain the author name (usually the first meaningful link)
+                        for link in author_card.find_all('a', href=True):
+                            href = link.get('href', '')
+                            # Skip links to publications, tags, or the article itself
+                            if '/tag/' in href or 'subscribe' in href.lower():
+                                continue
+                            text = link.get_text(strip=True)
+                            # Check if this looks like a person name
+                            if text and len(text) > 2 and len(text) < 50:
+                                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', text):
+                                    # This is likely the author name
                                     metadata['author'] = text
                                     break
 
-            # Pattern B: Look for author avatar image and find name nearby
+            # Pattern B: Look for the author section with avatar and "Written by" text together
             if 'author' not in metadata:
-                author_imgs = soup.find_all('img', alt=True)
-                for img in author_imgs:
-                    alt_text = img.get('alt', '')
-                    # Medium uses alt text like "Mikael Cho" for author avatars
-                    if alt_text and len(alt_text) > 2 and len(alt_text) < 50:
-                        # Check if it looks like a person's name
-                        if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', alt_text):
-                            # Verify this is likely an author avatar (small image, in author section)
-                            parent = img.find_parent('a') or img.find_parent('div')
-                            if parent:
-                                # Check if the same name appears as text nearby
-                                parent_text = parent.get_text()
-                                if alt_text in parent_text:
-                                    metadata['author'] = alt_text
-                                    break
+                # Find all divs/sections that contain "Written by"
+                for container in soup.find_all(['div', 'section']):
+                    container_text = container.get_text()
+                    if 'Written by' in container_text:
+                        # Look for an h4 or strong link inside this container (common Medium pattern)
+                        for name_elem in container.find_all(['h4', 'a']):
+                            name_text = name_elem.get_text(strip=True)
+                            if name_text and len(name_text) > 2 and len(name_text) < 50:
+                                # Check it's a person name (First Last format)
+                                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+$', name_text):
+                                    # Make sure this is in the same "Written by" section
+                                    if 'Written by' in container_text[:200]:
+                                        metadata['author'] = name_text
+                                        break
+                        if 'author' in metadata:
+                            break
 
         # Pattern 1: Image with "Photo" in alt + nearby name
         author_img = soup.find('img', alt=re.compile(r'Photo|Avatar|Author', re.I))
@@ -879,11 +886,11 @@ def preprocess_medium_html(html_content: str) -> str:
         soup = BeautifulSoup(html_content, 'html.parser')
 
         # Medium responses section patterns
-        # Pattern 1: Section containing "Responses" text
+        # Pattern 1: Section containing "Responses" text anywhere
         for elem in soup.find_all(['section', 'div']):
-            # Check if this element or its children contain "Responses ("
-            text = elem.get_text()[:100] if elem.get_text() else ''
-            if re.search(r'Responses?\s*\(\d+\)', text):
+            text = elem.get_text() if elem.get_text() else ''
+            # Check for "Responses (X)" pattern
+            if re.search(r'Responses?\s*\(\d+\)', text[:500]):
                 elem.decompose()
                 continue
 
@@ -896,16 +903,45 @@ def preprocess_medium_html(html_content: str) -> str:
         for elem in soup.find_all(attrs={'data-testid': re.compile(r'response|comment', re.I)}):
             elem.decompose()
 
-        # Pattern 3: Remove "Written by" footer section that appears after article
-        # (This often precedes the responses section)
+        # Pattern 3: Remove promotional CTA sections (common before responses)
+        # These contain text like "Subscribe here" or "million people have used/read"
+        for elem in soup.find_all(['div', 'section', 'p']):
+            text = elem.get_text() if elem.get_text() else ''
+            # Check for promotional stats patterns
+            if re.search(r'(million|thousand)\s+people\s+have\s+(used|read)', text, re.I):
+                # This is likely a promotional CTA - remove it and all following siblings
+                for sibling in list(elem.find_next_siblings()):
+                    sibling.decompose()
+                elem.decompose()
+                break
+            # Check for "Subscribe here" CTA
+            if re.search(r'Subscribe\s+here\.?\s*$', text, re.I):
+                for sibling in list(elem.find_next_siblings()):
+                    sibling.decompose()
+                elem.decompose()
+                break
+
+        # Pattern 4: Remove "Written by" footer section that appears after article
         for elem in soup.find_all(['div', 'section']):
             elem_class = ' '.join(elem.get('class', []))
-            # Look for author bio sections that appear at end of article
             if re.search(r'postMeta|authorCard|writer-card', elem_class, re.I):
-                # Check if this is after the main content (has "followers" text)
                 text = elem.get_text()
                 if 'followers' in text.lower() and 'following' in text.lower():
                     elem.decompose()
+
+        # Pattern 5: Remove elements that look like comments (contain common comment phrases)
+        comment_patterns = [
+            r'^BRAVO!',
+            r'^Well said',
+            r'^Thank [yY]ou',
+            r'^I (very much )?(appreciate|agree)',
+        ]
+        for elem in soup.find_all(['p', 'div']):
+            text = elem.get_text(strip=True) if elem.get_text() else ''
+            for pattern in comment_patterns:
+                if re.match(pattern, text):
+                    elem.decompose()
+                    break
 
         return str(soup)
 
@@ -1605,6 +1641,15 @@ def remove_marketing_content(content: str) -> str:
         r'^#+?\s*responses?\s*\(\d+\)',  # "Responses (2)" or "## Responses (5)"
         r'^responses?\s*\(\d+\)',  # Plain "Responses (2)" without heading
         r'^\*?\*?responses?\*?\*?\s*\(\d+\)',  # Bold responses header
+        # Medium promotional CTA patterns (paragraph text, not headers)
+        r'subscribe\s+here\.?\s*$',  # "Subscribe here." at end of line
+        r'(million|thousand)\s+people\s+have\s+(used|read)',  # "X million people have used/read"
+        r'Work with the best (designers|developers)',  # Medium/Crew promotional text
+        # Comment/response patterns (when they appear as text)
+        r'^BRAVO!',  # Common comment exclamations
+        r'^Well said',
+        r'^Thank YOU',
+        r'^I (very much )?(appreciate|agree|love)',
     ]
 
     # Compile patterns
