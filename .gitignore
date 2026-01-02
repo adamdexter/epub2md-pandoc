@@ -9,3 +9,7 @@ run_gui.bat
 sample-epubs-for-testing/*.epub
 sample-epubs-for-testing/*.azw3
 test-output/
+
+# Medium session data (contains auth cookies - never commit)
+.medium_cookies/
+.medium_chrome_profile/

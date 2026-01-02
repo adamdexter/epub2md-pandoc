@@ -1,9 +1,10 @@
-# EPUB to Markdown Batch Converter
+# EPUB & Web to Markdown Converter
 
-Automatically converts EPUB files to Markdown with AI-optimized filenames that include book metadata.
+Convert EPUB files and web articles to AI-optimized Markdown for Claude Projects and RAG systems.
 
 ## Features
 
+### EPUB Conversion
 - ✅ **Batch processes** all EPUB files in a folder
 - 📖 **Extracts metadata** (title, author, year, edition) from EPUB files
 - 🤖 **AI-optimized filenames** without special characters (parentheses, brackets)
@@ -18,6 +19,14 @@ Automatically converts EPUB files to Markdown with AI-optimized filenames that i
 - 📊 **Detailed reporting** - shows artifacts found, scores, and improvements
 - 🔄 **Preserves optimal files** - skips unnecessary cleanup for clean EPUBs
 - ⚙️ **Configurable thresholds** - adjust quality requirements to your needs
+
+### Web Article Conversion
+- 🌐 **Convert any web article** to clean Markdown
+- 📰 **Medium article support** with authenticated access (member-only content)
+- 🖼️ **Downloads images** locally for offline access
+- 📝 **Extracts metadata** (title, author, publication date)
+- 🧹 **Cleans HTML** - removes ads, navigation, and clutter
+- 🔗 **Preserves links** and formatting
 
 ## Filename Format
 
@@ -182,6 +191,103 @@ python3 epub_to_md_converter.py ~/Books/epub ~/Books/markdown
 ```bash
 python3 epub_to_md_converter.py .
 ```
+
+---
+
+## Web Article Conversion
+
+Convert web articles (blog posts, news articles, Medium posts) to Markdown.
+
+### Basic Usage
+
+**Via GUI (Recommended):**
+1. Run `./run_gui.sh` (Linux/macOS) or `run_gui.bat` (Windows)
+2. Open http://localhost:3763
+3. Click the "Web Articles" tab
+4. Paste a URL and click Convert
+
+**Via Command Line:**
+```bash
+python3 html_to_md_converter.py https://example.com/article
+```
+
+### Medium Articles (Authenticated Access)
+
+Medium gates full article content behind a paywall. This converter supports authenticated access to read member-only articles using your Medium account.
+
+#### How It Works
+
+1. **First-time setup**: When you convert a Medium article, a browser window opens
+2. **Log in once**: Sign in to Medium using your email, Google, or other method
+3. **Session saved**: Your session is saved locally for future conversions
+4. **Full content**: All future Medium conversions use your saved session
+
+#### Using Your Medium Credentials
+
+When converting a Medium article for the first time:
+
+```
+============================================================
+Converting: https://medium.com/@author/article-title-abc123
+============================================================
+
+[Medium Detected] Using Selenium for authenticated access...
+      Opening browser...
+      Using undetected-chromedriver (Cloudflare bypass mode)
+
+      ╔════════════════════════════════════════════════════════╗
+      ║  MEDIUM LOGIN REQUIRED                                  ║
+      ║  Please log in to Medium in the browser window.         ║
+      ║  You have 3 minutes to complete login.                  ║
+      ║  Your session will be saved for future use.             ║
+      ╚════════════════════════════════════════════════════════╝
+```
+
+**Login options:**
+- Email/Password
+- Google Sign-In
+- Apple Sign-In
+- Facebook Sign-In
+
+After logging in, the browser will automatically fetch the article and close.
+
+#### Session Persistence
+
+Your Medium session is stored locally in:
+- `.medium_cookies/` - Session cookies
+- `.medium_chrome_profile/` - Browser profile
+
+These are gitignored and never uploaded. Delete these folders to log out.
+
+#### Cloudflare Protection
+
+Medium uses Cloudflare protection. The converter uses `undetected-chromedriver` to bypass this automatically. If you encounter Cloudflare loops:
+
+1. Delete `.medium_chrome_profile/` folder
+2. Try again - you may need to solve a CAPTCHA once
+3. Ensure Chrome is installed on your system
+
+#### Converting Medium Articles
+
+**Single article:**
+```bash
+python3 html_to_md_converter.py https://medium.com/@author/article-title-abc123
+```
+
+**Via GUI:**
+1. Paste the Medium URL in the Web Articles tab
+2. Click Convert
+3. Log in when prompted (first time only)
+4. Article is saved as Markdown
+
+#### Privacy & Security
+
+- Your credentials are **never stored** by this tool
+- Only session cookies are saved (same as your browser)
+- All data stays on your local machine
+- Delete `.medium_cookies/` and `.medium_chrome_profile/` to clear all session data
+
+---
 
 ## Output
 
@@ -465,6 +571,24 @@ The script automatically truncates long filenames to ~100 characters at word bou
 ### Special characters in filenames
 The script automatically removes filesystem-unsafe characters like `<>:"/\|?*`
 
+### Medium: Stuck in Cloudflare loop
+1. Delete the `.medium_chrome_profile/` folder
+2. Run the conversion again
+3. You may need to solve a CAPTCHA once manually
+4. Ensure you have Chrome installed (not just Chromium)
+
+### Medium: "Another session is running"
+Only one Medium conversion can run at a time. Close other browser windows using the Medium profile, or wait for the current conversion to complete.
+
+### Medium: Login not detected
+If the converter doesn't detect your login:
+1. After logging in, navigate to any Medium article
+2. Wait a few seconds on the article page
+3. The converter will detect you're logged in and proceed
+
+### Medium: distutils not found (Python 3.12+)
+Run `pip install setuptools` - this provides the distutils compatibility shim needed for Python 3.12 and later.
+
 ## Advanced: Modifying the Script
 
 ### Change filename format
@@ -561,8 +685,19 @@ MIT License - Feel free to modify and use as needed.
 
 ## Contributing
 
-Suggestions and improvements welcome! Common enhancements:
-- Support for multiple languages
-- Batch processing with parallel conversions
-- GUI version
-- Additional metadata extraction (ISBN, publisher, etc.)
+Suggestions and improvements welcome! See [ARCHITECTURE.md](ARCHITECTURE.md) for internal documentation.
+
+### Future Enhancements
+- Support for additional platforms (LinkedIn, Substack)
+- Batch URL processing
+- Additional metadata extraction (ISBN, publisher)
+- Parallel conversions for large batches
+
+### Adding New Platform Support
+
+The codebase is designed to be extensible. To add support for a new platform:
+1. Create a new module (e.g., `linkedin_scraper.py`)
+2. Follow the pattern from `medium_scraper.py`
+3. Update `html_to_md_converter.py` to import and use the new module
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed instructions.
