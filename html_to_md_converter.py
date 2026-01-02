@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.4"  # 1.0.4 adds SPA/JS-rendered site support via trafilatura fetch
+CONVERTER_VERSION = "1.0.5"  # 1.0.5 fixes reading time, removes marketing copy, filters images
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -409,6 +409,38 @@ def format_toc_for_markdown(toc: List[Dict[str, Any]], title: str = None) -> str
     return '\n'.join(lines) + '\n'
 
 
+def extract_toc_from_markdown(markdown_content: str) -> List[Dict[str, Any]]:
+    """
+    Extract table of contents from markdown headings.
+    This is more reliable than extracting from HTML as it works on the final cleaned content.
+    """
+    toc = []
+
+    # Match markdown headings: ## Heading or ### Heading etc.
+    heading_pattern = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
+
+    for match in heading_pattern.finditer(markdown_content):
+        level = len(match.group(1))
+        text = match.group(2).strip()
+
+        # Skip empty or very short headings
+        if not text or len(text) < 2:
+            continue
+
+        # Skip headings that look like marketing/promotional content
+        marketing_keywords = [
+            'subscribe', 'newsletter', 'sign up', 'follow us', 'related',
+            'more from', 'you might', 'recommended', 'share this',
+            'about the author', 'join our', 'connect with'
+        ]
+        if any(kw in text.lower() for kw in marketing_keywords):
+            continue
+
+        toc.append({'text': text, 'level': level})
+
+    return toc
+
+
 def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
     """
     Extract metadata from modern SPA (Single Page Application) sites.
@@ -470,29 +502,65 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
         if time_elem:
             metadata['publication_date'] = time_elem.get('datetime')
 
-        # ===== READING TIME: Look for "X min" patterns =====
-        reading_patterns = [
-            soup.find('span', string=re.compile(r'^\d+\s*min', re.I)),
-            soup.find('div', string=re.compile(r'^\d+\s*min', re.I)),
-            soup.find(string=re.compile(r'\d+\s*min(ute)?s?\s*(read)?', re.I)),
-        ]
-        for elem in reading_patterns:
-            if elem:
-                text = elem if isinstance(elem, str) else elem.get_text()
-                match = re.search(r'(\d+)\s*min', text, re.I)
-                if match:
-                    metadata['reading_time_raw'] = int(match.group(1))
-                    break
+        # ===== READING TIME: Look for "X min read" specifically near article header =====
+        # First, try to find reading time near the h1/title area (more reliable)
+        reading_time_found = None
 
-        # ===== TAGS: Look for tag lists =====
+        # Look for explicit "X min read" pattern (most reliable)
+        read_pattern = soup.find(string=re.compile(r'\b(\d+)\s*min(ute)?s?\s*read\b', re.I))
+        if read_pattern:
+            match = re.search(r'(\d+)\s*min', read_pattern, re.I)
+            if match:
+                rt = int(match.group(1))
+                if 1 <= rt <= 30:  # Reasonable article reading time
+                    reading_time_found = rt
+
+        # If not found, look near the article header (within first 20% of page)
+        if not reading_time_found and h1:
+            # Get h1's parent container and look for reading time nearby
+            header_area = h1.find_parent(['header', 'div', 'section'])
+            if header_area:
+                rt_elem = header_area.find(string=re.compile(r'^\s*\d+\s*min\s*$', re.I))
+                if rt_elem:
+                    match = re.search(r'(\d+)', rt_elem)
+                    if match:
+                        rt = int(match.group(1))
+                        if 1 <= rt <= 30:
+                            reading_time_found = rt
+
+        if reading_time_found:
+            metadata['reading_time_raw'] = reading_time_found
+
+        # ===== TAGS: Look for tag/topic links =====
         tags = []
-        # Look for tag links in list containers
-        tag_containers = soup.find_all(['ul', 'div'], class_=re.compile(r'tag|topic|categor', re.I))
+
+        # Pattern 1: Links with /topic/, /tag/, /category/ in href
+        topic_links = soup.find_all('a', href=re.compile(r'/(topic|tag|category|subject)/', re.I))
+        for link in topic_links:
+            tag_text = link.get_text(strip=True)
+            if tag_text and 2 < len(tag_text) < 50 and tag_text not in tags:
+                # Skip navigation-like text
+                if not re.match(r'^(home|about|contact|blog|all|more|see)', tag_text, re.I):
+                    tags.append(tag_text)
+
+        # Pattern 2: Elements with tag/topic class containing links
+        tag_containers = soup.find_all(['ul', 'div', 'nav'], class_=re.compile(r'tag|topic|categor', re.I))
         for container in tag_containers:
             for tag_link in container.find_all('a'):
                 tag_text = tag_link.get_text(strip=True)
-                if tag_text and len(tag_text) < 50 and tag_text not in tags:
-                    tags.append(tag_text)
+                if tag_text and 2 < len(tag_text) < 50 and tag_text not in tags:
+                    if not re.match(r'^(home|about|contact|blog|all|more|see)', tag_text, re.I):
+                        tags.append(tag_text)
+
+        # Pattern 3: Look for "Topics:" or "Tags:" labels followed by links
+        for label in soup.find_all(string=re.compile(r'^(topics?|tags?|categories?):\s*$', re.I)):
+            parent = label.find_parent()
+            if parent:
+                for link in parent.find_all('a'):
+                    tag_text = link.get_text(strip=True)
+                    if tag_text and 2 < len(tag_text) < 50 and tag_text not in tags:
+                        tags.append(tag_text)
+
         if tags:
             metadata['tags'] = tags[:15]  # Limit to 15 tags
 
@@ -1316,11 +1384,71 @@ def generate_yaml_frontmatter(
     return '\n'.join(lines)
 
 
+def remove_marketing_content(content: str) -> str:
+    """
+    Remove marketing, promotional, and related content sections from article.
+    These sections typically appear at the end of articles and add noise for RAG.
+    """
+    lines = content.split('\n')
+    clean_lines = []
+    skip_rest = False
+
+    # Patterns that indicate start of marketing/promotional content
+    marketing_patterns = [
+        # Subscribe/newsletter patterns
+        r'^#+\s*subscribe',
+        r'^#+\s*sign\s*up',
+        r'^#+\s*join\s*(our|the)',
+        r'^#+\s*get\s*(our|the|updates)',
+        r'^#+\s*stay\s*(updated|informed|ahead)',
+        r'^#+\s*newsletter',
+        # Related content patterns
+        r'^#+\s*(related|more|other|similar)\s*(posts?|articles?|content|reading)',
+        r'^#+\s*you\s*(might|may)\s*(also\s*)?(like|enjoy)',
+        r'^#+\s*recommended',
+        r'^#+\s*from\s+the\s+(library|blog|archive)',
+        r'^#+\s*content\s+from',
+        r'^#+\s*(also|more)\s+on',
+        # CTA patterns
+        r'^#+\s*share\s+this',
+        r'^#+\s*follow\s+us',
+        r'^#+\s*connect\s+with',
+        r'^#+\s*about\s+the\s+author',  # Usually at the very end
+        # Specific promotional text
+        r'^\*?do you have.*share with our community',
+        r'^\*?join our contributor',
+        r'^\*?we want to hear from you',
+    ]
+
+    # Compile patterns
+    compiled_patterns = [re.compile(p, re.I) for p in marketing_patterns]
+
+    for i, line in enumerate(lines):
+        # Check if this line matches a marketing pattern
+        if not skip_rest:
+            for pattern in compiled_patterns:
+                if pattern.search(line.strip()):
+                    skip_rest = True
+                    break
+
+        if not skip_rest:
+            clean_lines.append(line)
+
+    # If we removed too much (>50%), something went wrong - keep original
+    if len(clean_lines) < len(lines) * 0.5:
+        return content
+
+    return '\n'.join(clean_lines)
+
+
 def clean_markdown_for_rag(content: str) -> str:
     """
     Clean and optimize markdown content for RAG systems.
     Includes garbage character removal for corrupted SPA content.
     """
+
+    # ===== Step 0: Remove marketing/promotional content =====
+    content = remove_marketing_content(content)
 
     # ===== Step 1: Remove garbage/non-printable characters =====
     # Keep only printable ASCII and common Unicode, plus whitespace
@@ -1461,9 +1589,6 @@ def convert_url_to_markdown(
     if not tags and 'tags' in spa_meta:
         tags = spa_meta['tags']
 
-    # Extract table of contents
-    toc = extract_table_of_contents(html_content)
-
     print(f"      Title: {metadata.get('title', 'Not found')}")
     print(f"      Author: {metadata.get('author', 'Not found')}")
     print(f"      Date: {metadata.get('publication_date', 'Not found')}")
@@ -1472,8 +1597,6 @@ def convert_url_to_markdown(
         print(f"      Reading time (from page): {metadata['reading_time_raw']} min")
     if tags:
         print(f"      Tags: {', '.join(tags[:5])}{'...' if len(tags) > 5 else ''}")
-    if toc:
-        print(f"      TOC: {len(toc)} sections found")
 
     # Step 3: Extract article content
     print("\n[3/6] Extracting article content...")
@@ -1493,10 +1616,27 @@ def convert_url_to_markdown(
 
     if download_images:
         print("\n[4/6] Processing images...")
-        images = extract_images(html_content, url)
-        print(f"      Found {len(images)} images")
+        all_images = extract_images(html_content, url)
 
-        if images:
+        # Filter to only images that are actually referenced in the article content
+        # This avoids downloading nav images, author avatars, related post images, etc.
+        article_images = []
+        for img in all_images:
+            img_url = img['url']
+            # Check if this image URL (or a variant) appears in the content
+            # Handle various URL formats and partial matches
+            url_parts = urlparse(img_url)
+            img_filename = url_parts.path.split('/')[-1] if url_parts.path else ''
+
+            # Check for direct URL reference or filename reference in content
+            if (img_url in content or
+                (img_filename and img_filename in content) or
+                img.get('priority')):  # Always include og:image as it's the main article image
+                article_images.append(img)
+
+        print(f"      Found {len(all_images)} images on page, {len(article_images)} in article")
+
+        if article_images:
             image_dir = output_path / image_subdir
             image_dir.mkdir(exist_ok=True)
 
@@ -1504,7 +1644,7 @@ def convert_url_to_markdown(
             base_name = sanitize_filename(f"{metadata.get('author', 'Unknown')} - {metadata.get('title', 'Article')[:40]} - {metadata.get('source_name', 'Web')}")
 
             downloaded = 0
-            for idx, img in enumerate(images, 1):
+            for idx, img in enumerate(article_images, 1):
                 local_name, err = download_image(img['url'], image_dir, base_name, idx)
                 if local_name:
                     downloaded += 1
@@ -1518,7 +1658,7 @@ def convert_url_to_markdown(
                     content = content.replace(f"]({old_ref})", f"]({new_ref})")
                     content = content.replace(f"src=\"{old_ref}\"", f"src=\"{new_ref}\"")
 
-            print(f"      Downloaded {downloaded}/{len(images)} images")
+            print(f"      Downloaded {downloaded}/{len(article_images)} article images")
     else:
         print("\n[4/6] Skipping image download...")
 
@@ -1533,6 +1673,12 @@ def convert_url_to_markdown(
         print(f"      Reading time: {reading_time} minutes (from page)")
     else:
         print(f"      Estimated reading time: {reading_time} minutes")
+
+    # Generate TOC from the cleaned markdown content (not from HTML)
+    # This ensures the TOC only includes article headings, not marketing/footer content
+    toc = extract_toc_from_markdown(content)
+    if toc:
+        print(f"      TOC: {len(toc)} sections")
 
     # Step 6: Generate final output
     print("\n[6/6] Generating output file...")
