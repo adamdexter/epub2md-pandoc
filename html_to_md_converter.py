@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.2"  # 1.0.1 was HTML sanitization fix, 1.0.2 is SPA site support
+CONVERTER_VERSION = "1.0.3"  # 1.0.3 fixes trafilatura API compatibility
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -699,6 +699,7 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
             content = None
 
             # Attempt 1: Full parameters with markdown
+            print("      Trying trafilatura with markdown format...")
             try:
                 content = extract(
                     html_content,
@@ -710,11 +711,15 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
                     favor_precision=True,
                     deduplicate=True,
                 )
-            except (TypeError, ValueError) as e:
-                print(f"      Note: Using simplified extraction ({e})")
+                if content:
+                    print(f"      Trafilatura markdown: got {len(content)} chars")
+            except Exception as e:
+                print(f"      Trafilatura markdown failed: {e}")
+                content = None
 
-            # Attempt 2: Simpler parameters
+            # Attempt 2: Simpler parameters (no output_format)
             if not content:
+                print("      Trying trafilatura with simple parameters...")
                 try:
                     content = extract(
                         html_content,
@@ -722,37 +727,27 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
                         include_tables=True,
                         deduplicate=True,
                     )
-                except (TypeError, ValueError):
-                    pass
+                    if content:
+                        print(f"      Trafilatura simple: got {len(content)} chars")
+                except Exception as e:
+                    print(f"      Trafilatura simple failed: {e}")
+                    content = None
 
             # Attempt 3: Minimal parameters
             if not content:
+                print("      Trying trafilatura minimal...")
                 try:
                     content = extract(html_content)
-                except Exception:
-                    pass
+                    if content:
+                        print(f"      Trafilatura minimal: got {len(content)} chars")
+                except Exception as e:
+                    print(f"      Trafilatura minimal failed: {e}")
+                    content = None
 
             # Validate content isn't garbage (common with SPA sites)
             if content and not is_content_valid(content):
-                print("      Warning: Extracted content appears corrupted, trying text format")
+                print("      Warning: Extracted content appears corrupted")
                 content = None
-
-            # Fallback to text format if markdown failed
-            if not content:
-                try:
-                    text_content = extract(
-                        html_content,
-                        output_format='txt',
-                        include_tables=True,
-                        deduplicate=True,
-                    )
-                except (TypeError, ValueError):
-                    try:
-                        text_content = extract(html_content)
-                    except Exception:
-                        text_content = None
-                if text_content and is_content_valid(text_content):
-                    content = text_content
 
             if content and is_content_valid(content):
                 return content, metadata
@@ -762,6 +757,7 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
 
     # Fallback to readability-lxml
     if READABILITY_AVAILABLE and not content:
+        print("      Trying readability-lxml fallback...")
         try:
             doc = Document(html_content)
             title = doc.title()
@@ -774,8 +770,10 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
             content = html_to_simple_markdown(html_content_clean)
 
             if content and is_content_valid(content):
+                print(f"      Readability: got {len(content)} chars")
                 return content, metadata
             else:
+                print("      Readability: content validation failed")
                 content = None
 
         except Exception as e:
@@ -783,6 +781,7 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
 
     # Last resort: Enhanced BeautifulSoup extraction for SPA sites
     if BS4_AVAILABLE and not content:
+        print("      Trying BeautifulSoup fallback...")
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
 
@@ -811,6 +810,7 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
                     # Verify it has substantial text content
                     text = found.get_text(strip=True)
                     if len(text) > 500:
+                        print(f"      Found article via {tag_name} selector")
                         article = found
                         break
 
@@ -818,6 +818,7 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
                 content = html_to_simple_markdown(str(article))
             else:
                 # Get body content as last resort
+                print("      Using body content as last resort")
                 body = soup.find('body')
                 if body:
                     content = html_to_simple_markdown(str(body))
@@ -826,9 +827,14 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
             if content and not is_content_valid(content):
                 print("      Warning: BeautifulSoup content also appears corrupted")
                 content = None
+            elif content:
+                print(f"      BeautifulSoup: got {len(content)} chars")
 
         except Exception as e:
             print(f"      BeautifulSoup extraction failed: {e}")
+
+    if not content:
+        print("      ERROR: All extraction methods failed")
 
     return content, metadata
 
