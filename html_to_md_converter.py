@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.5"  # 1.0.5 fixes reading time, removes marketing copy, filters images
+CONVERTER_VERSION = "1.0.6"  # 1.0.6 fixes reading time, description, and tags extraction
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -502,31 +502,48 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
         if time_elem:
             metadata['publication_date'] = time_elem.get('datetime')
 
-        # ===== READING TIME: Look for "X min read" specifically near article header =====
-        # First, try to find reading time near the h1/title area (more reliable)
+        # ===== READING TIME: Look for reading time near article header =====
         reading_time_found = None
 
-        # Look for explicit "X min read" pattern (most reliable)
+        # Pattern 1: Look for explicit "X min read" pattern (most reliable)
         read_pattern = soup.find(string=re.compile(r'\b(\d+)\s*min(ute)?s?\s*read\b', re.I))
         if read_pattern:
             match = re.search(r'(\d+)\s*min', read_pattern, re.I)
             if match:
                 rt = int(match.group(1))
-                if 1 <= rt <= 30:  # Reasonable article reading time
+                if 1 <= rt <= 60:  # Reasonable article reading time
                     reading_time_found = rt
 
-        # If not found, look near the article header (within first 20% of page)
+        # Pattern 2: Look for standalone "X min" near h1/header area
         if not reading_time_found and h1:
-            # Get h1's parent container and look for reading time nearby
-            header_area = h1.find_parent(['header', 'div', 'section'])
-            if header_area:
-                rt_elem = header_area.find(string=re.compile(r'^\s*\d+\s*min\s*$', re.I))
-                if rt_elem:
-                    match = re.search(r'(\d+)', rt_elem)
-                    if match:
-                        rt = int(match.group(1))
-                        if 1 <= rt <= 30:
-                            reading_time_found = rt
+            # Search in multiple parent levels
+            for parent_tag in ['li', 'div', 'section', 'header', 'article']:
+                header_area = h1.find_parent(parent_tag)
+                if header_area:
+                    # Look for any element containing just "X min"
+                    for elem in header_area.find_all(['span', 'div', 'p', 'time']):
+                        text = elem.get_text(strip=True)
+                        # Match "9 min" or "9min" standalone
+                        if re.match(r'^\d+\s*min(ute)?s?\.?$', text, re.I):
+                            match = re.search(r'(\d+)', text)
+                            if match:
+                                rt = int(match.group(1))
+                                if 1 <= rt <= 60:
+                                    reading_time_found = rt
+                                    break
+                    if reading_time_found:
+                        break
+
+        # Pattern 3: Search entire page for "X min" in small text elements (likely metadata)
+        if not reading_time_found:
+            for elem in soup.find_all(['span', 'div', 'p'], string=re.compile(r'^\d+\s*min\.?$', re.I)):
+                text = elem.get_text(strip=True)
+                match = re.search(r'(\d+)', text)
+                if match:
+                    rt = int(match.group(1))
+                    if 1 <= rt <= 60:
+                        reading_time_found = rt
+                        break
 
         if reading_time_found:
             metadata['reading_time_raw'] = reading_time_found
@@ -534,32 +551,56 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
         # ===== TAGS: Look for tag/topic links =====
         tags = []
 
-        # Pattern 1: Links with /topic/, /tag/, /category/ in href
-        topic_links = soup.find_all('a', href=re.compile(r'/(topic|tag|category|subject)/', re.I))
+        # Helper to check if text is a valid tag
+        def is_valid_tag(text):
+            if not text or len(text) <= 2 or len(text) >= 50:
+                return False
+            # Skip navigation-like text
+            if re.match(r'^(home|about|contact|blog|all|more|see|view|read|share|library)', text, re.I):
+                return False
+            # Skip if it looks like a sentence
+            if len(text.split()) > 4:
+                return False
+            return True
+
+        # Pattern 1: Links with /topic/, /tag/, /category/, /subject/ in href
+        # Also check for /library/topic/ (Heavybit pattern)
+        topic_links = soup.find_all('a', href=re.compile(r'/(topic|tag|category|subject|subjects)/', re.I))
         for link in topic_links:
             tag_text = link.get_text(strip=True)
-            if tag_text and 2 < len(tag_text) < 50 and tag_text not in tags:
-                # Skip navigation-like text
-                if not re.match(r'^(home|about|contact|blog|all|more|see)', tag_text, re.I):
-                    tags.append(tag_text)
+            if is_valid_tag(tag_text) and tag_text not in tags:
+                tags.append(tag_text)
 
         # Pattern 2: Elements with tag/topic class containing links
-        tag_containers = soup.find_all(['ul', 'div', 'nav'], class_=re.compile(r'tag|topic|categor', re.I))
+        tag_containers = soup.find_all(['ul', 'div', 'nav', 'section'], class_=re.compile(r'tag|topic|categor|subject', re.I))
         for container in tag_containers:
             for tag_link in container.find_all('a'):
                 tag_text = tag_link.get_text(strip=True)
-                if tag_text and 2 < len(tag_text) < 50 and tag_text not in tags:
-                    if not re.match(r'^(home|about|contact|blog|all|more|see)', tag_text, re.I):
-                        tags.append(tag_text)
+                if is_valid_tag(tag_text) and tag_text not in tags:
+                    tags.append(tag_text)
 
         # Pattern 3: Look for "Topics:" or "Tags:" labels followed by links
-        for label in soup.find_all(string=re.compile(r'^(topics?|tags?|categories?):\s*$', re.I)):
+        for label in soup.find_all(string=re.compile(r'^(topics?|tags?|categories?|subjects?):\s*$', re.I)):
             parent = label.find_parent()
             if parent:
                 for link in parent.find_all('a'):
                     tag_text = link.get_text(strip=True)
-                    if tag_text and 2 < len(tag_text) < 50 and tag_text not in tags:
+                    if is_valid_tag(tag_text) and tag_text not in tags:
                         tags.append(tag_text)
+
+        # Pattern 4: Look for article:tag meta tags
+        for meta in soup.find_all('meta', property='article:tag'):
+            tag_text = meta.get('content', '').strip()
+            if is_valid_tag(tag_text) and tag_text not in tags:
+                tags.append(tag_text)
+
+        # Pattern 5: Look for keywords meta tag
+        keywords_meta = soup.find('meta', attrs={'name': 'keywords'})
+        if keywords_meta and keywords_meta.get('content'):
+            for kw in keywords_meta['content'].split(','):
+                kw = kw.strip()
+                if is_valid_tag(kw) and kw not in tags:
+                    tags.append(kw)
 
         if tags:
             metadata['tags'] = tags[:15]  # Limit to 15 tags
@@ -1364,11 +1405,11 @@ def generate_yaml_frontmatter(
     # Description/summary if available (from author, not generated)
     description = metadata.get('description')
     if description:
-        # Escape quotes in description
-        description = description.replace('"', '\\"')
-        # Truncate if too long
-        if len(description) > 300:
-            description = description[:297] + '...'
+        # Escape quotes and newlines in description
+        description = description.replace('"', '\\"').replace('\n', ' ').replace('\r', '')
+        # Truncate only if very long (500+ chars)
+        if len(description) > 500:
+            description = description[:497] + '...'
         lines.append(f'description: "{description}"')
 
     # Indicate if TOC is included
