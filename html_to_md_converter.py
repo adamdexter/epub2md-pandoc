@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.10"  # 1.0.10 adds Selenium-based Medium support
+CONVERTER_VERSION = "1.0.11"  # 1.0.11 fixes Cloudflare detection with Chrome profile support
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -77,7 +77,39 @@ MEDIUM_COOKIES_DIR = os.path.join(os.path.dirname(__file__), '.medium_cookies')
 MEDIUM_MANUAL_LOGIN_TIMEOUT = 180  # seconds to wait for manual login
 MEDIUM_BROWSER_TIMEOUT = 30  # seconds for page loads
 MEDIUM_HEADLESS_MODE = False  # Set to True after first login with saved cookies
-MEDIUM_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+MEDIUM_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Chrome profile support - use existing Chrome profile to bypass Cloudflare detection
+# Set to True to use your existing Chrome profile (recommended for Medium)
+MEDIUM_USE_CHROME_PROFILE = True
+
+def get_chrome_profile_path() -> Optional[str]:
+    """Auto-detect Chrome profile path based on OS."""
+    import platform
+    system = platform.system()
+    home = os.path.expanduser("~")
+
+    paths = []
+    if system == "Darwin":  # macOS
+        paths = [
+            os.path.join(home, "Library/Application Support/Google/Chrome"),
+            os.path.join(home, "Library/Application Support/Google/Chrome Canary"),
+        ]
+    elif system == "Linux":
+        paths = [
+            os.path.join(home, ".config/google-chrome"),
+            os.path.join(home, ".config/chromium"),
+        ]
+    elif system == "Windows":
+        paths = [
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), "Google/Chrome/User Data"),
+            os.path.join(home, "AppData/Local/Google/Chrome/User Data"),
+        ]
+
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
 
 
 # Default headers to mimic a real browser
@@ -1688,12 +1720,13 @@ def load_medium_cookies(driver) -> bool:
         return False
 
 
-def setup_medium_driver(headless: bool = False):
+def setup_medium_driver(headless: bool = False, use_profile: bool = True):
     """
     Set up Chrome WebDriver for Medium scraping.
 
     Args:
         headless: Run browser in headless mode (set False for manual login)
+        use_profile: Use existing Chrome profile to bypass bot detection
 
     Returns:
         WebDriver instance or None if setup fails
@@ -1705,19 +1738,51 @@ def setup_medium_driver(headless: bool = False):
     try:
         chrome_options = Options()
 
+        # Use existing Chrome profile to bypass Cloudflare detection
+        # This uses your real browser session and cookies
+        chrome_profile_path = None
+        if use_profile and MEDIUM_USE_CHROME_PROFILE:
+            chrome_profile_path = get_chrome_profile_path()
+            if chrome_profile_path:
+                print(f"      Using Chrome profile: {chrome_profile_path}")
+                chrome_options.add_argument(f'--user-data-dir={chrome_profile_path}')
+                # Use Default profile - you may need to close Chrome first
+                chrome_options.add_argument('--profile-directory=Default')
+            else:
+                print("      Chrome profile not found, using fresh browser")
+
         if headless:
-            chrome_options.add_argument('--headless')
+            # Use new headless mode that's less detectable
+            chrome_options.add_argument('--headless=new')
             print("      Running in headless mode")
         else:
             print("      Running in visible mode (browser window will open)")
 
-        # Anti-detection options
+        # Comprehensive anti-detection options
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_argument(f'user-agent={MEDIUM_USER_AGENT}')
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        chrome_options.add_argument('--disable-infobars')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-popup-blocking')
+        chrome_options.add_argument('--start-maximized')
+        chrome_options.add_argument('--window-size=1920,1080')
+
+        # Only set user-agent if not using profile (profile has its own)
+        if not chrome_profile_path:
+            chrome_options.add_argument(f'user-agent={MEDIUM_USER_AGENT}')
+
+        # Disable automation flags
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation', 'enable-logging'])
         chrome_options.add_experimental_option('useAutomationExtension', False)
+
+        # Additional preferences to appear more human
+        chrome_options.add_experimental_option('prefs', {
+            'credentials_enable_service': False,
+            'profile.password_manager_enabled': False,
+            'profile.default_content_setting_values.notifications': 2,
+        })
 
         # Initialize driver
         driver_path = ChromeDriverManager().install()
@@ -1736,24 +1801,53 @@ def setup_medium_driver(headless: bool = False):
 
         service = Service(driver_path)
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.maximize_window()
+
+        # Remove webdriver property to avoid detection
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': '''
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+            '''
+        })
+
+        if not headless:
+            driver.maximize_window()
 
         return driver
 
     except Exception as e:
-        print(f"      Error setting up Chrome WebDriver: {e}")
+        error_msg = str(e)
+        if 'user data directory is already in use' in error_msg.lower():
+            print("      Error: Chrome is already running. Please close Chrome and try again.")
+            print("      (When using Chrome profile, only one instance can run at a time)")
+        else:
+            print(f"      Error setting up Chrome WebDriver: {e}")
         return None
 
 
 def check_medium_login_status(driver) -> bool:
     """Check if we're logged into Medium."""
     try:
+        if driver is None:
+            return False
+
         # Navigate to Medium home to check login status
         driver.get("https://medium.com")
         time.sleep(3)
 
         # Check for signs of being logged in
-        page_source = driver.page_source.lower()
+        page_source = driver.page_source
+        if not page_source:
+            return False
+
+        page_source = page_source.lower()
 
         # Logged-in users typically see different elements
         # Check for common logged-out indicators
@@ -1842,6 +1936,11 @@ def fetch_medium_with_selenium(url: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Fetch Medium article using Selenium with authentication.
 
+    Strategy:
+    1. If using Chrome profile (recommended): Try fetching directly since user may already be logged in
+    2. If Chrome profile not available or fetch failed: Fall back to saved cookies
+    3. If no cookies or expired: Open browser for manual login
+
     Returns:
         Tuple of (html_content, error_message)
     """
@@ -1850,25 +1949,110 @@ def fetch_medium_with_selenium(url: str) -> Tuple[Optional[str], Optional[str]]:
 
     driver = None
     try:
-        # First, try with saved cookies in headless mode
+        # Check if we can use Chrome profile (bypasses Cloudflare detection)
+        chrome_profile_path = get_chrome_profile_path() if MEDIUM_USE_CHROME_PROFILE else None
+
+        if chrome_profile_path:
+            print("      Using Chrome profile for authenticated access...")
+            print("      Note: Close Chrome browser if you see 'user data directory in use' error")
+
+            # Try fetching directly - Chrome profile may have Medium session
+            driver = setup_medium_driver(headless=False, use_profile=True)
+            if driver:
+                # Go directly to the article
+                print(f"      Navigating to article...")
+                driver.get(url)
+                time.sleep(4)  # Wait for page load
+
+                # Check if we got full content
+                page_source = driver.page_source
+                if page_source and len(page_source) > 10000:
+                    page_lower = page_source.lower()
+                    # Check for paywall indicators
+                    if 'member-only story' not in page_lower and 'upgrade to read' not in page_lower:
+                        print("      ✓ Successfully fetched article (Chrome profile session)")
+
+                        # Scroll to trigger lazy loading
+                        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                        time.sleep(2)
+                        driver.execute_script("window.scrollTo(0, 0);")
+                        time.sleep(1)
+
+                        page_source = driver.page_source
+                        print(f"      ✓ Fetched {len(page_source):,} bytes")
+                        return page_source, None
+                    else:
+                        print("      Article is member-only, checking login status...")
+
+                # If we got here, either gated content or need login
+                # Check if user is logged in
+                driver.get("https://medium.com")
+                time.sleep(3)
+                page_source = driver.page_source or ""
+
+                if 'write' in page_source.lower() or 'new story' in page_source.lower():
+                    print("      ✓ Already logged into Medium via Chrome profile")
+                    # Fetch article again
+                    print(f"      Fetching article...")
+                    driver.get(url)
+                    time.sleep(5)
+
+                    # Scroll for lazy loading
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(2)
+                    driver.execute_script("window.scrollTo(0, 0);")
+                    time.sleep(1)
+
+                    page_source = driver.page_source
+                    if page_source and len(page_source) > 5000:
+                        print(f"      ✓ Fetched {len(page_source):,} bytes")
+                        return page_source, None
+                else:
+                    print("      Not logged into Medium. Please log in via the browser window...")
+                    print("")
+                    print("      ╔════════════════════════════════════════════════════════╗")
+                    print("      ║  MEDIUM LOGIN REQUIRED                                  ║")
+                    print("      ║  Please log in to Medium in the browser window.         ║")
+                    print(f"      ║  You have {MEDIUM_MANUAL_LOGIN_TIMEOUT // 60} minutes to complete login.                  ║")
+                    print("      ║  The browser will NOT close automatically.              ║")
+                    print("      ╚════════════════════════════════════════════════════════╝")
+                    print("")
+
+                    if medium_manual_login(driver):
+                        print(f"      Fetching article...")
+                        driver.get(url)
+                        time.sleep(5)
+
+                        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                        time.sleep(2)
+                        driver.execute_script("window.scrollTo(0, 0);")
+                        time.sleep(1)
+
+                        page_source = driver.page_source
+                        if page_source and len(page_source) > 5000:
+                            print(f"      ✓ Fetched {len(page_source):,} bytes")
+                            return page_source, None
+                    else:
+                        return None, "Login failed or timed out"
+
+                driver.quit()
+                driver = None
+
+        # Fallback: No Chrome profile or profile failed
+        # Try with saved cookies
         cookie_path = get_medium_cookie_path()
         has_cookies = os.path.exists(cookie_path)
 
         if has_cookies:
             print("      Found saved cookies, trying headless mode...")
-            driver = setup_medium_driver(headless=True)
+            driver = setup_medium_driver(headless=True, use_profile=False)
             if driver:
                 load_medium_cookies(driver)
-
-                # Navigate to the article
                 driver.get(url)
                 time.sleep(3)
 
-                # Check if we got the full content
                 page_source = driver.page_source
-
-                # Check for paywall/login prompts
-                if 'member-only' not in page_source.lower() and len(page_source) > 10000:
+                if page_source and 'member-only' not in page_source.lower() and len(page_source) > 10000:
                     print("      ✓ Successfully fetched with saved cookies")
                     return page_source, None
                 else:
@@ -1876,30 +2060,19 @@ def fetch_medium_with_selenium(url: str) -> Tuple[Optional[str], Optional[str]]:
                     driver.quit()
                     driver = None
 
-        # If no cookies or cookies failed, do manual login
-        print("      Opening browser for manual login...")
-        driver = setup_medium_driver(headless=False)
+        # Last resort: manual login without Chrome profile
+        print("      Opening fresh browser for manual login...")
+        driver = setup_medium_driver(headless=False, use_profile=False)
         if not driver:
             return None, "Failed to set up browser"
 
-        # Try loading cookies first even in visible mode
-        if has_cookies:
-            load_medium_cookies(driver)
-            if check_medium_login_status(driver):
-                print("      ✓ Logged in with existing cookies")
-            else:
-                if not medium_manual_login(driver):
-                    return None, "Login failed or timed out"
-        else:
-            if not medium_manual_login(driver):
-                return None, "Login failed or timed out"
+        if not medium_manual_login(driver):
+            return None, "Login failed or timed out"
 
-        # Now fetch the article
         print(f"      Fetching article...")
         driver.get(url)
-        time.sleep(5)  # Wait for full page load
+        time.sleep(5)
 
-        # Scroll down to trigger lazy loading
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(2)
         driver.execute_script("window.scrollTo(0, 0);")
@@ -1907,14 +2080,17 @@ def fetch_medium_with_selenium(url: str) -> Tuple[Optional[str], Optional[str]]:
 
         page_source = driver.page_source
 
-        if len(page_source) > 5000:
+        if page_source and len(page_source) > 5000:
             print(f"      ✓ Fetched {len(page_source):,} bytes")
             return page_source, None
         else:
             return None, "Failed to fetch article content"
 
     except Exception as e:
-        return None, f"Selenium error: {str(e)}"
+        error_msg = str(e)
+        if 'user data directory is already in use' in error_msg.lower():
+            return None, "Chrome is already running. Please close Chrome and try again."
+        return None, f"Selenium error: {error_msg}"
 
     finally:
         if driver:
