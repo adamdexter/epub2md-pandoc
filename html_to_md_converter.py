@@ -498,7 +498,7 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
         # This is needed because Medium's article:author meta tag contains a URL, not the display name
         if is_medium_url(url):
             # Pattern A: Find "Written by" text and get the name from the SAME parent container
-            written_by = soup.find(string=re.compile(r'^Written by$', re.I))
+            written_by = soup.find(string=re.compile(r'Written by', re.I))
             if written_by:
                 # Get the immediate parent and look for the name within it
                 parent = written_by.find_parent()
@@ -513,9 +513,10 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
                             if '/tag/' in href or 'subscribe' in href.lower():
                                 continue
                             text = link.get_text(strip=True)
-                            # Check if this looks like a person name
+                            # Check if this looks like a person name (at least 2 words, starts with capital)
                             if text and len(text) > 2 and len(text) < 50:
-                                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', text):
+                                # Match names like "Mikael Cho", "John Smith Jr", etc.
+                                if re.match(r'^[A-Z][a-z]+\s+[A-Z]', text):
                                     # This is likely the author name
                                     metadata['author'] = text
                                     break
@@ -530,8 +531,8 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
                         for name_elem in container.find_all(['h4', 'a']):
                             name_text = name_elem.get_text(strip=True)
                             if name_text and len(name_text) > 2 and len(name_text) < 50:
-                                # Check it's a person name (First Last format)
-                                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+$', name_text):
+                                # Check it's a person name (starts with First Last pattern)
+                                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', name_text):
                                     # Make sure this is in the same "Written by" section
                                     if 'Written by' in container_text[:200]:
                                         metadata['author'] = name_text
@@ -1852,6 +1853,16 @@ def convert_url_to_markdown(
             if spa_meta.get('author') and 'medium.com' not in spa_meta['author']:
                 metadata['author'] = spa_meta['author']
                 print(f"      Note: Using display name '{spa_meta['author']}' instead of URL")
+            else:
+                # Fallback: Extract username from URL and format as title case
+                # e.g., https://medium.com/@mikaelcho -> "Mikaelcho"
+                url_match = re.search(r'@([a-zA-Z0-9_]+)', author)
+                if url_match:
+                    username = url_match.group(1)
+                    # Format as title case (capitalize first letter)
+                    formatted_name = username.title()
+                    metadata['author'] = formatted_name
+                    print(f"      Note: Using username '{formatted_name}' from URL (display name not found)")
 
     # Extract tags/topics (also check SPA metadata for tags)
     tags = extract_tags_and_topics(html_content)
