@@ -497,48 +497,62 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
         # Medium-specific: Look for "Written by [Name]" pattern
         # This is needed because Medium's article:author meta tag contains a URL, not the display name
         if is_medium_url(url):
-            # Pattern A: Find "Written by" text and get the name from the SAME parent container
-            written_by = soup.find(string=re.compile(r'Written by', re.I))
-            if written_by:
-                # Get the immediate parent and look for the name within it
-                parent = written_by.find_parent()
-                if parent:
-                    # Go up to find the author card container (usually a div or section)
-                    author_card = parent.find_parent(['div', 'section', 'li'])
-                    if author_card:
-                        # Look for links that contain the author name (usually the first meaningful link)
-                        for link in author_card.find_all('a', href=True):
-                            href = link.get('href', '')
-                            # Skip links to publications, tags, or the article itself
-                            if '/tag/' in href or 'subscribe' in href.lower():
-                                continue
-                            text = link.get_text(strip=True)
-                            # Check if this looks like a person name (at least 2 words, starts with capital)
-                            if text and len(text) > 2 and len(text) < 50:
-                                # Match names like "Mikael Cho", "John Smith Jr", etc.
-                                if re.match(r'^[A-Z][a-z]+\s+[A-Z]', text):
-                                    # This is likely the author name
-                                    metadata['author'] = text
-                                    break
-
-            # Pattern B: Look for the author section with avatar and "Written by" text together
-            if 'author' not in metadata:
-                # Find all divs/sections that contain "Written by"
-                for container in soup.find_all(['div', 'section']):
-                    container_text = container.get_text()
-                    if 'Written by' in container_text:
-                        # Look for an h4 or strong link inside this container (common Medium pattern)
-                        for name_elem in container.find_all(['h4', 'a']):
-                            name_text = name_elem.get_text(strip=True)
-                            if name_text and len(name_text) > 2 and len(name_text) < 50:
-                                # Check it's a person name (starts with First Last pattern)
-                                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', name_text):
-                                    # Make sure this is in the same "Written by" section
-                                    if 'Written by' in container_text[:200]:
-                                        metadata['author'] = name_text
-                                        break
-                        if 'author' in metadata:
+            # Pattern A: Find image with alt text that looks like a person's name
+            # Medium uses author avatars with alt="Mikael Cho"
+            for img in soup.find_all('img', alt=True):
+                alt_text = img.get('alt', '').strip()
+                if alt_text and len(alt_text) > 4 and len(alt_text) < 40:
+                    # Check if alt text looks like a person name (First Last)
+                    if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', alt_text):
+                        # Verify it's not a generic alt like "Photo of..."
+                        if not re.match(r'^(Photo|Image|Avatar|Logo|Icon)', alt_text, re.I):
+                            metadata['author'] = alt_text
                             break
+
+            # Pattern B: Find links to Medium user profiles and get their text
+            if 'author' not in metadata:
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href', '')
+                    # Look for links to Medium user profiles (/@username or /u/...)
+                    if '/@' in href or '/u/' in href:
+                        text = link.get_text(strip=True)
+                        if text and len(text) > 4 and len(text) < 40:
+                            if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', text):
+                                metadata['author'] = text
+                                break
+
+            # Pattern C: Look near "followers" text - author section always has follower count
+            if 'author' not in metadata:
+                followers_elem = soup.find(string=re.compile(r'\d+[KkMm]?\s*followers', re.I))
+                if followers_elem:
+                    # Go up to find the container and look for name
+                    container = followers_elem.find_parent(['div', 'section'])
+                    if container:
+                        for elem in container.find_all(['a', 'h2', 'h3', 'h4', 'span']):
+                            text = elem.get_text(strip=True)
+                            if text and len(text) > 4 and len(text) < 40:
+                                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', text):
+                                    if 'followers' not in text.lower() and 'following' not in text.lower():
+                                        metadata['author'] = text
+                                        break
+
+            # Pattern D: Find "Written by" text and look for nearby name
+            if 'author' not in metadata:
+                written_by = soup.find(string=re.compile(r'Written by', re.I))
+                if written_by:
+                    parent = written_by.find_parent()
+                    if parent:
+                        author_card = parent.find_parent(['div', 'section', 'li'])
+                        if author_card:
+                            for link in author_card.find_all('a', href=True):
+                                href = link.get('href', '')
+                                if '/tag/' in href or 'subscribe' in href.lower():
+                                    continue
+                                text = link.get_text(strip=True)
+                                if text and len(text) > 4 and len(text) < 40:
+                                    if re.match(r'^[A-Z][a-z]+\s+[A-Z]', text):
+                                        metadata['author'] = text
+                                        break
 
         # Pattern 1: Image with "Photo" in alt + nearby name
         author_img = soup.find('img', alt=re.compile(r'Photo|Avatar|Author', re.I))
