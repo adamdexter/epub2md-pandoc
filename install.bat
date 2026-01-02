@@ -59,15 +59,27 @@ if exist .venv (
     )
 )
 
-echo Installing Flask in virtual environment...
-.venv\Scripts\python.exe -m pip install flask >nul 2>&1
-if %errorlevel% equ 0 (
-    echo [OK] Flask installed successfully
+echo Upgrading pip...
+.venv\Scripts\python.exe -m pip install --upgrade pip >nul 2>&1
+
+echo Installing dependencies from requirements.txt...
+if exist requirements.txt (
+    .venv\Scripts\python.exe -m pip install -r requirements.txt
+    if %errorlevel% equ 0 (
+        echo [OK] All dependencies installed successfully
+    ) else (
+        echo [WARN] Some dependencies failed, trying individually...
+        .venv\Scripts\python.exe -m pip install flask requests trafilatura beautifulsoup4 readability-lxml
+        echo [INFO] Installing Medium article support...
+        .venv\Scripts\python.exe -m pip install setuptools selenium webdriver-manager undetected-chromedriver
+    )
 ) else (
-    echo [ERROR] Failed to install Flask
-    pause
-    exit /b 1
+    echo [INFO] requirements.txt not found, installing core dependencies...
+    .venv\Scripts\python.exe -m pip install flask requests trafilatura beautifulsoup4 readability-lxml
+    echo [INFO] Installing Medium article support...
+    .venv\Scripts\python.exe -m pip install setuptools selenium webdriver-manager undetected-chromedriver
 )
+echo [OK] Dependencies installed
 
 REM Create GUI launcher script
 echo Creating GUI launcher script...

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-EPUB to Markdown Converter - Web GUI
-A simple Flask-based web interface for the EPUB converter.
+EPUB & Web Article to Markdown Converter - Web GUI
+A Flask-based web interface for converting EPUBs and web articles to AI-optimized Markdown.
 """
 
 import os
@@ -13,6 +13,19 @@ from epub_to_md_converter import process_folder, check_pandoc_installed
 import threading
 import queue
 import io
+
+# Try to import HTML converter (may not be available if dependencies missing)
+HTML_CONVERTER_AVAILABLE = False
+HTML_DEPENDENCIES_MISSING = []
+try:
+    from html_to_md_converter import convert_url_to_markdown, check_dependencies
+    deps_ok, missing = check_dependencies()
+    if deps_ok:
+        HTML_CONVERTER_AVAILABLE = True
+    else:
+        HTML_DEPENDENCIES_MISSING = missing
+except ImportError as e:
+    HTML_DEPENDENCIES_MISSING = ['html_to_md_converter module']
 
 # Preferences file location (in user's home directory)
 PREFERENCES_FILE = os.path.join(os.path.expanduser('~'), '.epub2md_preferences.json')
@@ -50,13 +63,23 @@ def save_preferences(prefs):
 
 app = Flask(__name__)
 
-# Global variables for conversion status
+# Global variables for EPUB conversion status
 conversion_status = {
     'running': False,
     'progress': [],
     'current': 0,
     'total': 0,
     'completed': False
+}
+
+# Global variables for URL conversion status
+url_conversion_status = {
+    'running': False,
+    'progress': [],
+    'completed': False,
+    'success': False,
+    'output_file': None,
+    'error': None
 }
 
 class OutputCapture:
@@ -387,6 +410,111 @@ def native_folder_dialog():
         'path': path,
         'selected': success
     })
+
+
+# ============================================================
+# URL to Markdown Conversion Routes
+# ============================================================
+
+@app.route('/check_html_converter')
+def check_html_converter():
+    """Check if HTML converter is available and dependencies are installed"""
+    return jsonify({
+        'available': HTML_CONVERTER_AVAILABLE,
+        'missing_dependencies': HTML_DEPENDENCIES_MISSING
+    })
+
+
+@app.route('/convert_url', methods=['POST'])
+def convert_url():
+    """Start URL to Markdown conversion"""
+    global url_conversion_status
+
+    if not HTML_CONVERTER_AVAILABLE:
+        return jsonify({
+            'error': f'HTML converter not available. Missing dependencies: {", ".join(HTML_DEPENDENCIES_MISSING)}'
+        }), 400
+
+    data = request.json
+    url = data.get('url', '').strip()
+    output_folder = data.get('output_folder', 'converted_articles')
+    download_images = data.get('download_images', True)
+
+    if not url:
+        return jsonify({'error': 'URL is required'}), 400
+
+    # Basic URL validation
+    if not url.startswith(('http://', 'https://')):
+        return jsonify({'error': 'URL must start with http:// or https://'}), 400
+
+    # Reset status
+    url_conversion_status = {
+        'running': True,
+        'progress': [],
+        'completed': False,
+        'success': False,
+        'output_file': None,
+        'error': None
+    }
+
+    # Run conversion in background thread
+    def run_url_conversion():
+        global url_conversion_status
+        try:
+            # Capture output
+            old_stdout = sys.stdout
+            sys.stdout = OutputCapture()
+
+            # Redirect to url_conversion_status instead of conversion_status
+            class URLOutputCapture:
+                def __init__(self):
+                    self.queue = queue.Queue()
+
+                def write(self, text):
+                    if text.strip():
+                        self.queue.put(text)
+                        url_conversion_status['progress'].append(text)
+                    sys.__stdout__.write(text)
+
+                def flush(self):
+                    sys.__stdout__.flush()
+
+            sys.stdout = URLOutputCapture()
+
+            # Run conversion
+            success, message, output_path = convert_url_to_markdown(
+                url=url,
+                output_dir=output_folder,
+                download_images=download_images
+            )
+
+            # Restore stdout
+            sys.stdout = old_stdout
+
+            url_conversion_status['success'] = success
+            url_conversion_status['output_file'] = output_path
+            if not success:
+                url_conversion_status['error'] = message
+            url_conversion_status['completed'] = True
+            url_conversion_status['running'] = False
+
+        except Exception as e:
+            url_conversion_status['progress'].append(f"Error: {str(e)}")
+            url_conversion_status['error'] = str(e)
+            url_conversion_status['running'] = False
+            url_conversion_status['completed'] = True
+
+    thread = threading.Thread(target=run_url_conversion)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'status': 'started'})
+
+
+@app.route('/url_status')
+def url_status():
+    """Get URL conversion status"""
+    return jsonify(url_conversion_status)
 
 
 def main():
