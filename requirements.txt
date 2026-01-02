@@ -14,3 +14,4 @@ readability-lxml>=0.8.1
 # Medium article support (authenticated access via Selenium)
 selenium>=4.0.0
 webdriver-manager>=4.0.0
+undetected-chromedriver>=3.5.0  # Best for bypassing Cloudflare detection
