@@ -10,3 +10,7 @@ beautifulsoup4>=4.11.0
 
 # Optional: Enhanced content extraction fallback
 readability-lxml>=0.8.1
+
+# Medium article support (authenticated access via Selenium)
+selenium>=4.0.0
+webdriver-manager>=4.0.0

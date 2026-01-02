@@ -9,7 +9,10 @@ import os
 import re
 import sys
 import json
+import stat
+import time
 import hashlib
+import pickle
 import mimetypes
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Any
@@ -18,13 +21,14 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.9"  # 1.0.9 adds Medium RSS support for gated content
+CONVERTER_VERSION = "1.0.10"  # 1.0.10 adds Selenium-based Medium support
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
 READABILITY_AVAILABLE = False
 REQUESTS_AVAILABLE = False
 BS4_AVAILABLE = False
+SELENIUM_AVAILABLE = False
 
 try:
     import requests
@@ -51,6 +55,29 @@ try:
     BS4_AVAILABLE = True
 except ImportError:
     pass
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    pass
+
+
+# ============================================================================
+# MEDIUM SELENIUM CONFIGURATION
+# ============================================================================
+MEDIUM_COOKIES_DIR = os.path.join(os.path.dirname(__file__), '.medium_cookies')
+MEDIUM_MANUAL_LOGIN_TIMEOUT = 180  # seconds to wait for manual login
+MEDIUM_BROWSER_TIMEOUT = 30  # seconds for page loads
+MEDIUM_HEADLESS_MODE = False  # Set to True after first login with saved cookies
+MEDIUM_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
 # Default headers to mimic a real browser
@@ -1581,9 +1608,11 @@ def clean_markdown_for_rag(content: str) -> str:
 
 
 # ============================================================================
-# MEDIUM RSS SUPPORT
-# Medium gates content for non-logged-in users, but RSS feeds contain full
-# article content in the content:encoded field.
+# MEDIUM SELENIUM SUPPORT
+# Medium gates content for non-logged-in users. We use Selenium to:
+# 1. Load saved cookies for authenticated session
+# 2. If no cookies, open browser for manual login
+# 3. Fetch the full article content with authenticated session
 # ============================================================================
 
 def is_medium_url(url: str) -> bool:
@@ -1594,7 +1623,6 @@ def is_medium_url(url: str) -> bool:
     - medium.com/@username/article
     - medium.com/publication/article
     - username.medium.com/article
-    - Some custom domains (harder to detect)
     """
     parsed = urlparse(url)
     host = parsed.netloc.lower()
@@ -1610,214 +1638,290 @@ def is_medium_url(url: str) -> bool:
     return False
 
 
-def parse_medium_url(url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """
-    Parse a Medium URL to extract feed URL and article identifier.
-
-    Returns:
-        Tuple of (feed_url, article_slug, article_id)
-        - feed_url: The RSS feed URL to fetch
-        - article_slug: The article slug from the URL path
-        - article_id: The article ID (last part after the last dash)
-    """
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    path = parsed.path.strip('/')
-
-    if not path:
-        return None, None, None
-
-    path_parts = path.split('/')
-
-    # Extract article slug and ID
-    # Medium URLs end with: article-title-slug-abc123def456
-    # The ID is the last segment after the final dash (typically 12 chars)
-    article_slug = path_parts[-1] if path_parts else None
-    article_id = None
-
-    if article_slug and '-' in article_slug:
-        # The ID is typically the last 8-12 hex characters after the last dash
-        last_dash_idx = article_slug.rfind('-')
-        potential_id = article_slug[last_dash_idx + 1:]
-        # Medium IDs are typically 10-12 alphanumeric characters
-        if len(potential_id) >= 8 and potential_id.isalnum():
-            article_id = potential_id
-
-    # Determine feed URL based on URL pattern
-    feed_url = None
-
-    if host in ('medium.com', 'www.medium.com'):
-        if path_parts:
-            first_segment = path_parts[0]
-
-            # Pattern: medium.com/@username/article
-            if first_segment.startswith('@'):
-                feed_url = f"https://medium.com/feed/{first_segment}"
-
-            # Pattern: medium.com/publication/article
-            elif len(path_parts) >= 2:
-                # Could be a publication
-                feed_url = f"https://medium.com/feed/{first_segment}"
-
-    # Pattern: username.medium.com/article
-    elif host.endswith('.medium.com'):
-        username = host.replace('.medium.com', '')
-        feed_url = f"https://medium.com/feed/@{username}"
-
-    return feed_url, article_slug, article_id
+def get_medium_cookie_path() -> str:
+    """Get the path for Medium cookies file."""
+    os.makedirs(MEDIUM_COOKIES_DIR, exist_ok=True)
+    return os.path.join(MEDIUM_COOKIES_DIR, 'medium_cookies.pkl')
 
 
-def fetch_medium_rss(feed_url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Fetch Medium RSS feed.
-
-    Returns:
-        Tuple of (rss_content, error_message)
-    """
-    if not REQUESTS_AVAILABLE:
-        return None, "requests library not installed"
-
+def save_medium_cookies(driver) -> bool:
+    """Save Medium session cookies to file."""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-        }
-
-        response = requests.get(feed_url, headers=headers, timeout=timeout)
-        response.raise_for_status()
-
-        return response.text, None
-
-    except requests.exceptions.RequestException as e:
-        return None, f"Failed to fetch RSS feed: {str(e)}"
-
-
-def find_article_in_rss(rss_content: str, target_url: str, article_slug: str, article_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Find a specific article in the RSS feed.
-
-    Returns:
-        Dict with article data if found, None otherwise
-    """
-    import xml.etree.ElementTree as ET
-
-    try:
-        # Parse RSS XML
-        root = ET.fromstring(rss_content)
-
-        # Define namespaces used in Medium RSS
-        namespaces = {
-            'content': 'http://purl.org/rss/1.0/modules/content/',
-            'dc': 'http://purl.org/dc/elements/1.1/',
-            'atom': 'http://www.w3.org/2005/Atom',
-        }
-
-        # Find all items in the feed
-        channel = root.find('channel')
-        if channel is None:
-            return None
-
-        items = channel.findall('item')
-
-        for item in items:
-            item_link = item.find('link')
-            item_guid = item.find('guid')
-
-            link_text = item_link.text if item_link is not None else ''
-            guid_text = item_guid.text if item_guid is not None else ''
-
-            # Try to match by URL, slug, or ID
-            matched = False
-
-            # Exact URL match
-            if link_text and (link_text == target_url or link_text.rstrip('/') == target_url.rstrip('/')):
-                matched = True
-
-            # Match by article ID in link or guid
-            elif article_id:
-                if article_id in link_text or article_id in guid_text:
-                    matched = True
-
-            # Match by slug (less reliable, but useful as fallback)
-            elif article_slug and article_slug in link_text:
-                matched = True
-
-            if matched:
-                # Extract article data
-                article_data = {
-                    'title': '',
-                    'author': '',
-                    'publication_date': '',
-                    'content_html': '',
-                    'link': link_text,
-                    'tags': [],
-                }
-
-                # Title
-                title_elem = item.find('title')
-                if title_elem is not None and title_elem.text:
-                    article_data['title'] = title_elem.text.strip()
-
-                # Author (dc:creator)
-                creator_elem = item.find('dc:creator', namespaces)
-                if creator_elem is not None and creator_elem.text:
-                    article_data['author'] = creator_elem.text.strip()
-
-                # Publication date
-                pubdate_elem = item.find('pubDate')
-                if pubdate_elem is not None and pubdate_elem.text:
-                    article_data['publication_date'] = pubdate_elem.text.strip()
-
-                # Content (content:encoded) - this has the full article HTML
-                content_elem = item.find('content:encoded', namespaces)
-                if content_elem is not None and content_elem.text:
-                    article_data['content_html'] = content_elem.text
-
-                # Tags (category elements)
-                for category in item.findall('category'):
-                    if category.text:
-                        article_data['tags'].append(category.text.strip())
-
-                return article_data
-
-        return None
-
-    except ET.ParseError as e:
-        print(f"      Warning: RSS parse error: {e}")
-        return None
+        cookie_path = get_medium_cookie_path()
+        cookies = driver.get_cookies()
+        with open(cookie_path, 'wb') as f:
+            pickle.dump(cookies, f)
+        print(f"      Saved {len(cookies)} cookies for future sessions")
+        return True
     except Exception as e:
-        print(f"      Warning: Error finding article in RSS: {e}")
+        print(f"      Warning: Could not save cookies: {e}")
+        return False
+
+
+def load_medium_cookies(driver) -> bool:
+    """Load Medium session cookies from file."""
+    try:
+        cookie_path = get_medium_cookie_path()
+        if not os.path.exists(cookie_path):
+            return False
+
+        # First navigate to Medium domain so cookies can be set
+        driver.get("https://medium.com")
+        time.sleep(2)
+
+        with open(cookie_path, 'rb') as f:
+            cookies = pickle.load(f)
+
+        for cookie in cookies:
+            try:
+                # Remove expiry if it's causing issues
+                if 'expiry' in cookie:
+                    del cookie['expiry']
+                driver.add_cookie(cookie)
+            except Exception:
+                pass  # Some cookies may fail, that's OK
+
+        print(f"      Loaded {len(cookies)} saved cookies")
+        return True
+    except Exception as e:
+        print(f"      Could not load cookies: {e}")
+        return False
+
+
+def setup_medium_driver(headless: bool = False):
+    """
+    Set up Chrome WebDriver for Medium scraping.
+
+    Args:
+        headless: Run browser in headless mode (set False for manual login)
+
+    Returns:
+        WebDriver instance or None if setup fails
+    """
+    if not SELENIUM_AVAILABLE:
+        print("      Error: Selenium not installed. Run: pip install selenium webdriver-manager")
+        return None
+
+    try:
+        chrome_options = Options()
+
+        if headless:
+            chrome_options.add_argument('--headless')
+            print("      Running in headless mode")
+        else:
+            print("      Running in visible mode (browser window will open)")
+
+        # Anti-detection options
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_argument(f'user-agent={MEDIUM_USER_AGENT}')
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
+        # Initialize driver
+        driver_path = ChromeDriverManager().install()
+
+        # Fix for webdriver-manager bug: sometimes returns wrong file
+        if not os.access(driver_path, os.X_OK) or 'THIRD_PARTY' in driver_path:
+            driver_dir = os.path.dirname(driver_path)
+            for file in os.listdir(driver_dir):
+                if file == 'chromedriver' or file == 'chromedriver.exe':
+                    potential_path = os.path.join(driver_dir, file)
+                    if os.path.isfile(potential_path):
+                        if not os.access(potential_path, os.X_OK):
+                            os.chmod(potential_path, os.stat(potential_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                        driver_path = potential_path
+                        break
+
+        service = Service(driver_path)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.maximize_window()
+
+        return driver
+
+    except Exception as e:
+        print(f"      Error setting up Chrome WebDriver: {e}")
         return None
 
 
-def convert_medium_article(article_data: Dict[str, Any], url: str) -> Tuple[str, Dict[str, Any]]:
+def check_medium_login_status(driver) -> bool:
+    """Check if we're logged into Medium."""
+    try:
+        # Navigate to Medium home to check login status
+        driver.get("https://medium.com")
+        time.sleep(3)
+
+        # Check for signs of being logged in
+        page_source = driver.page_source.lower()
+
+        # Logged-in users typically see different elements
+        # Check for common logged-out indicators
+        logged_out_indicators = [
+            'sign in',
+            'get started',
+            'open in app',
+            'create your free account'
+        ]
+
+        # Check for logged-in indicators
+        logged_in_indicators = [
+            'write',
+            'notifications',
+            'new story'
+        ]
+
+        has_logged_out = any(ind in page_source for ind in logged_out_indicators)
+        has_logged_in = any(ind in page_source for ind in logged_in_indicators)
+
+        if has_logged_in and not has_logged_out:
+            return True
+
+        # Also check for user avatar or profile menu
+        try:
+            driver.find_element(By.CSS_SELECTOR, "button[data-testid='headerUserButton'], img[alt*='profile'], .avatar")
+            return True
+        except:
+            pass
+
+        return False
+
+    except Exception as e:
+        print(f"      Error checking login status: {e}")
+        return False
+
+
+def medium_manual_login(driver) -> bool:
     """
-    Convert Medium article data from RSS to markdown content and metadata.
+    Prompt user to manually log in to Medium.
+
+    Opens the login page and waits for user to complete login.
+    """
+    try:
+        print("\n      ╔════════════════════════════════════════════════════════╗")
+        print("      ║  MEDIUM LOGIN REQUIRED                                  ║")
+        print("      ║  Please log in to Medium in the browser window.         ║")
+        print("      ║  You have 3 minutes to complete login.                  ║")
+        print("      ║  The browser will NOT close automatically.              ║")
+        print("      ╚════════════════════════════════════════════════════════╝\n")
+
+        # Navigate to Medium login
+        driver.get("https://medium.com/m/signin")
+        time.sleep(2)
+
+        # Wait for user to log in
+        start_time = time.time()
+        timeout = MEDIUM_MANUAL_LOGIN_TIMEOUT
+
+        while time.time() - start_time < timeout:
+            current_url = driver.current_url
+
+            # Check if user has navigated away from login pages
+            if '/signin' not in current_url and '/login' not in current_url:
+                # Verify we're actually logged in
+                time.sleep(2)
+                if check_medium_login_status(driver):
+                    print("      ✓ Login successful!")
+                    save_medium_cookies(driver)
+                    return True
+
+            time.sleep(2)
+            remaining = int(timeout - (time.time() - start_time))
+            if remaining % 30 == 0 and remaining > 0:
+                print(f"      Waiting for login... ({remaining}s remaining)")
+
+        print("      ✗ Login timed out")
+        return False
+
+    except Exception as e:
+        print(f"      Error during manual login: {e}")
+        return False
+
+
+def fetch_medium_with_selenium(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Fetch Medium article using Selenium with authentication.
 
     Returns:
-        Tuple of (markdown_content, metadata_dict)
+        Tuple of (html_content, error_message)
     """
-    metadata = {
-        'title': article_data.get('title', ''),
-        'author': article_data.get('author', ''),
-        'source_name': 'Medium',
-    }
+    if not SELENIUM_AVAILABLE:
+        return None, "Selenium not available. Install with: pip install selenium webdriver-manager"
 
-    # Parse publication date
-    pub_date = article_data.get('publication_date', '')
-    if pub_date:
-        metadata['publication_date'] = pub_date
+    driver = None
+    try:
+        # First, try with saved cookies in headless mode
+        cookie_path = get_medium_cookie_path()
+        has_cookies = os.path.exists(cookie_path)
 
-    # Convert HTML content to markdown
-    html_content = article_data.get('content_html', '')
+        if has_cookies:
+            print("      Found saved cookies, trying headless mode...")
+            driver = setup_medium_driver(headless=True)
+            if driver:
+                load_medium_cookies(driver)
 
-    if html_content:
-        # Use our existing html_to_simple_markdown function
-        content = html_to_simple_markdown(html_content)
-    else:
-        content = ''
+                # Navigate to the article
+                driver.get(url)
+                time.sleep(3)
 
-    return content, metadata
+                # Check if we got the full content
+                page_source = driver.page_source
+
+                # Check for paywall/login prompts
+                if 'member-only' not in page_source.lower() and len(page_source) > 10000:
+                    print("      ✓ Successfully fetched with saved cookies")
+                    return page_source, None
+                else:
+                    print("      Cookies may be expired, need fresh login...")
+                    driver.quit()
+                    driver = None
+
+        # If no cookies or cookies failed, do manual login
+        print("      Opening browser for manual login...")
+        driver = setup_medium_driver(headless=False)
+        if not driver:
+            return None, "Failed to set up browser"
+
+        # Try loading cookies first even in visible mode
+        if has_cookies:
+            load_medium_cookies(driver)
+            if check_medium_login_status(driver):
+                print("      ✓ Logged in with existing cookies")
+            else:
+                if not medium_manual_login(driver):
+                    return None, "Login failed or timed out"
+        else:
+            if not medium_manual_login(driver):
+                return None, "Login failed or timed out"
+
+        # Now fetch the article
+        print(f"      Fetching article...")
+        driver.get(url)
+        time.sleep(5)  # Wait for full page load
+
+        # Scroll down to trigger lazy loading
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+
+        page_source = driver.page_source
+
+        if len(page_source) > 5000:
+            print(f"      ✓ Fetched {len(page_source):,} bytes")
+            return page_source, None
+        else:
+            return None, "Failed to fetch article content"
+
+    except Exception as e:
+        return None, f"Selenium error: {str(e)}"
+
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
 
 
 def convert_url_to_markdown(
@@ -1848,57 +1952,27 @@ def convert_url_to_markdown(
     print('='*60)
 
     # ===== MEDIUM SPECIAL HANDLING =====
-    # Medium gates content for non-logged-in users, so we try RSS first
-    medium_rss_content = None
-    medium_rss_metadata = None
-    medium_rss_tags = None
-    medium_rss_html = None  # Original HTML from RSS for image extraction
+    # Medium gates content for non-logged-in users, use Selenium with auth
+    medium_selenium_html = None
 
     if is_medium_url(url):
-        print("\n[Medium Detected] Trying RSS feed approach...")
+        print("\n[Medium Detected] Using Selenium for authenticated access...")
 
-        feed_url, article_slug, article_id = parse_medium_url(url)
-        print(f"      Feed URL: {feed_url}")
-        print(f"      Article ID: {article_id or 'not found'}")
-
-        if feed_url:
-            rss_content, rss_error = fetch_medium_rss(feed_url)
-
-            if rss_content:
-                print(f"      Fetched RSS feed ({len(rss_content):,} bytes)")
-
-                article_data = find_article_in_rss(rss_content, url, article_slug, article_id)
-
-                if article_data:
-                    print(f"      Found article in RSS feed!")
-                    print(f"      Title: {article_data.get('title', 'Unknown')}")
-                    print(f"      Author: {article_data.get('author', 'Unknown')}")
-
-                    # Convert the article
-                    medium_rss_content, medium_rss_metadata = convert_medium_article(article_data, url)
-                    medium_rss_tags = article_data.get('tags', [])
-                    medium_rss_html = article_data.get('content_html', '')
-
-                    if medium_rss_content and len(medium_rss_content) > 200:
-                        print(f"      Extracted {len(medium_rss_content):,} chars from RSS")
-                    else:
-                        print("      RSS content too short, will try regular fetch")
-                        medium_rss_content = None
-                        medium_rss_html = None
-                else:
-                    print("      Article not found in RSS feed (may be older than feed limit)")
-                    print("      Falling back to regular fetch...")
+        if SELENIUM_AVAILABLE:
+            medium_selenium_html, selenium_error = fetch_medium_with_selenium(url)
+            if medium_selenium_html:
+                print(f"      ✓ Got authenticated content via Selenium")
             else:
-                print(f"      RSS fetch failed: {rss_error}")
-                print("      Falling back to regular fetch...")
+                print(f"      Selenium fetch failed: {selenium_error}")
+                print("      Falling back to regular fetch (may be truncated)...")
         else:
-            print("      Could not determine RSS feed URL")
-            print("      Falling back to regular fetch...")
+            print("      Selenium not available - install with: pip install selenium webdriver-manager")
+            print("      Falling back to regular fetch (may be truncated)...")
 
-    # Step 1: Fetch the URL (skip if we got content from Medium RSS)
-    if medium_rss_content:
-        print("\n[1/6] Using content from Medium RSS feed...")
-        html_content = medium_rss_html or ''
+    # Step 1: Fetch the URL
+    if medium_selenium_html:
+        print("\n[1/6] Using content from Selenium...")
+        html_content = medium_selenium_html
     else:
         print("\n[1/6] Fetching URL...")
         html_content, error = fetch_url(url)
