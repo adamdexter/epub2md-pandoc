@@ -494,6 +494,44 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
                 metadata['title'] = h1.get_text(strip=True)
 
         # ===== AUTHOR: Look for author card patterns =====
+        # Medium-specific: Look for "Written by [Name]" pattern
+        # This is needed because Medium's article:author meta tag contains a URL, not the display name
+        if is_medium_url(url):
+            # Pattern A: Find "Written by" text and get the adjacent name
+            written_by = soup.find(string=re.compile(r'Written by', re.I))
+            if written_by:
+                parent = written_by.find_parent()
+                if parent:
+                    # The name is usually in a sibling or nearby element
+                    for elem in parent.find_all_next(['a', 'span', 'div', 'h4', 'p'], limit=5):
+                        text = elem.get_text(strip=True)
+                        # Skip "Written by" itself and follower counts
+                        if text and 'Written by' not in text and not re.match(r'^\d+[KkMm]?\s*(followers?)?', text):
+                            # Check if it looks like a name (has multiple words or starts with capital)
+                            if re.match(r'^[A-Z][a-z]+(\s+[A-Z])?', text) and len(text) > 2 and len(text) < 60:
+                                # Skip if it looks like a publication name or date
+                                if not re.match(r'^(Published|Last|in|Founder|CEO|Follow)', text, re.I):
+                                    metadata['author'] = text
+                                    break
+
+            # Pattern B: Look for author avatar image and find name nearby
+            if 'author' not in metadata:
+                author_imgs = soup.find_all('img', alt=True)
+                for img in author_imgs:
+                    alt_text = img.get('alt', '')
+                    # Medium uses alt text like "Mikael Cho" for author avatars
+                    if alt_text and len(alt_text) > 2 and len(alt_text) < 50:
+                        # Check if it looks like a person's name
+                        if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', alt_text):
+                            # Verify this is likely an author avatar (small image, in author section)
+                            parent = img.find_parent('a') or img.find_parent('div')
+                            if parent:
+                                # Check if the same name appears as text nearby
+                                parent_text = parent.get_text()
+                                if alt_text in parent_text:
+                                    metadata['author'] = alt_text
+                                    break
+
         # Pattern 1: Image with "Photo" in alt + nearby name
         author_img = soup.find('img', alt=re.compile(r'Photo|Avatar|Author', re.I))
         if author_img:
@@ -829,6 +867,53 @@ def is_content_valid(content: str) -> bool:
     return True
 
 
+def preprocess_medium_html(html_content: str) -> str:
+    """
+    Preprocess Medium HTML to remove responses/comments section.
+    Medium includes user comments in the page HTML which gets extracted as article content.
+    """
+    if not BS4_AVAILABLE:
+        return html_content
+
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        # Medium responses section patterns
+        # Pattern 1: Section containing "Responses" text
+        for elem in soup.find_all(['section', 'div']):
+            # Check if this element or its children contain "Responses ("
+            text = elem.get_text()[:100] if elem.get_text() else ''
+            if re.search(r'Responses?\s*\(\d+\)', text):
+                elem.decompose()
+                continue
+
+            # Check for class names related to responses/comments
+            elem_class = ' '.join(elem.get('class', []))
+            if re.search(r'response|comment|replies', elem_class, re.I):
+                elem.decompose()
+
+        # Pattern 2: Remove elements with specific response-related attributes
+        for elem in soup.find_all(attrs={'data-testid': re.compile(r'response|comment', re.I)}):
+            elem.decompose()
+
+        # Pattern 3: Remove "Written by" footer section that appears after article
+        # (This often precedes the responses section)
+        for elem in soup.find_all(['div', 'section']):
+            elem_class = ' '.join(elem.get('class', []))
+            # Look for author bio sections that appear at end of article
+            if re.search(r'postMeta|authorCard|writer-card', elem_class, re.I):
+                # Check if this is after the main content (has "followers" text)
+                text = elem.get_text()
+                if 'followers' in text.lower() and 'following' in text.lower():
+                    elem.decompose()
+
+        return str(soup)
+
+    except Exception as e:
+        print(f"      Warning: Medium HTML preprocessing error: {e}")
+        return html_content
+
+
 def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str], Dict[str, Any]]:
     """
     Extract main article content from HTML.
@@ -838,6 +923,10 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
     Returns:
         Tuple of (markdown_content, metadata_dict)
     """
+    # Preprocess Medium HTML to remove responses/comments
+    if is_medium_url(url):
+        html_content = preprocess_medium_html(html_content)
+
     content = None
     metadata = {}
 
@@ -1512,6 +1601,10 @@ def remove_marketing_content(content: str) -> str:
         r'^\*?do you have.*share with our community',
         r'^\*?join our contributor',
         r'^\*?we want to hear from you',
+        # Medium responses/comments section
+        r'^#+?\s*responses?\s*\(\d+\)',  # "Responses (2)" or "## Responses (5)"
+        r'^responses?\s*\(\d+\)',  # Plain "Responses (2)" without heading
+        r'^\*?\*?responses?\*?\*?\s*\(\d+\)',  # Bold responses header
     ]
 
     # Compile patterns
@@ -1703,6 +1796,17 @@ def convert_url_to_markdown(
 
     # Merge metadata (priority: JSON-LD > OpenGraph > SPA > HTML)
     metadata = merge_metadata(json_ld_meta, og_meta, spa_meta, html_meta)
+
+    # Medium-specific: If author looks like a URL, prefer the display name from SPA extraction
+    # Medium's article:author meta tag contains URLs like https://medium.com/@username
+    if is_medium_url(url) and metadata.get('author'):
+        author = metadata['author']
+        # Check if author is a URL (contains medium.com or starts with http)
+        if 'medium.com' in author or author.startswith('http'):
+            # Prefer SPA-extracted author (display name like "Mikael Cho")
+            if spa_meta.get('author') and 'medium.com' not in spa_meta['author']:
+                metadata['author'] = spa_meta['author']
+                print(f"      Note: Using display name '{spa_meta['author']}' instead of URL")
 
     # Extract tags/topics (also check SPA metadata for tags)
     tags = extract_tags_and_topics(html_content)
