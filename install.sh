@@ -208,14 +208,14 @@ setup_venv() {
             "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 readability-lxml
             # Medium support dependencies (optional but recommended)
             print_info "Installing Medium article support (Selenium + undetected-chromedriver)..."
-            "$VENV_DIR/bin/pip" install selenium webdriver-manager undetected-chromedriver
+            "$VENV_DIR/bin/pip" install setuptools selenium webdriver-manager undetected-chromedriver
         fi
     else
         # Fallback if requirements.txt doesn't exist
         "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 readability-lxml
         # Medium support dependencies
         print_info "Installing Medium article support..."
-        "$VENV_DIR/bin/pip" install selenium webdriver-manager undetected-chromedriver
+        "$VENV_DIR/bin/pip" install setuptools selenium webdriver-manager undetected-chromedriver
         if [ $? -eq 0 ]; then
             print_success "All dependencies installed successfully"
         else

@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.13"  # 1.0.13 fixes Medium bugs, adds debug logging
+CONVERTER_VERSION = "1.0.14"  # 1.0.14 fixes remaining RSS references, adds setuptools for Python 3.12
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -2149,18 +2149,13 @@ def convert_url_to_markdown(
     # Step 3: Extract article content
     print("\n[3/6] Extracting article content...")
 
-    # Use Medium RSS content if available
-    if medium_rss_content:
-        content = medium_rss_content
-        print(f"      Using content from Medium RSS feed")
-    else:
-        content, content_meta = extract_article_content(html_content, url)
+    content, content_meta = extract_article_content(html_content, url)
 
-        if not content:
-            return False, "Failed to extract article content", None
+    if not content:
+        return False, "Failed to extract article content", None
 
-        # Merge any additional metadata from content extraction
-        metadata = merge_metadata(metadata, content_meta)
+    # Merge any additional metadata from content extraction
+    metadata = merge_metadata(metadata, content_meta)
 
     print(f"      Extracted {len(content):,} characters")
 

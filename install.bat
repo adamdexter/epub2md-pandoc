@@ -71,13 +71,13 @@ if exist requirements.txt (
         echo [WARN] Some dependencies failed, trying individually...
         .venv\Scripts\python.exe -m pip install flask requests trafilatura beautifulsoup4 readability-lxml
         echo [INFO] Installing Medium article support...
-        .venv\Scripts\python.exe -m pip install selenium webdriver-manager undetected-chromedriver
+        .venv\Scripts\python.exe -m pip install setuptools selenium webdriver-manager undetected-chromedriver
     )
 ) else (
     echo [INFO] requirements.txt not found, installing core dependencies...
     .venv\Scripts\python.exe -m pip install flask requests trafilatura beautifulsoup4 readability-lxml
     echo [INFO] Installing Medium article support...
-    .venv\Scripts\python.exe -m pip install selenium webdriver-manager undetected-chromedriver
+    .venv\Scripts\python.exe -m pip install setuptools selenium webdriver-manager undetected-chromedriver
 )
 echo [OK] Dependencies installed
 

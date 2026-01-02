@@ -14,4 +14,5 @@ readability-lxml>=0.8.1
 # Medium article support (authenticated access via Selenium)
 selenium>=4.0.0
 webdriver-manager>=4.0.0
+setuptools>=65.0.0  # Required for undetected-chromedriver on Python 3.12+ (provides distutils)
 undetected-chromedriver>=3.5.0  # Best for bypassing Cloudflare detection
