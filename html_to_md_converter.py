@@ -81,6 +81,26 @@ def check_dependencies() -> Tuple[bool, List[str]]:
     return len(missing) == 0, missing
 
 
+def sanitize_html(html_content: str) -> str:
+    """Remove control characters and other problematic content from HTML."""
+    if not html_content:
+        return html_content
+
+    # Remove NULL bytes and control characters (except newline, tab, carriage return)
+    # Control chars are 0x00-0x1F and 0x7F-0x9F, but keep \t (0x09), \n (0x0A), \r (0x0D)
+    cleaned = []
+    for char in html_content:
+        code = ord(char)
+        if code == 0x09 or code == 0x0A or code == 0x0D:  # tab, newline, carriage return
+            cleaned.append(char)
+        elif code < 0x20 or (0x7F <= code <= 0x9F):  # control characters
+            cleaned.append(' ')  # Replace with space
+        else:
+            cleaned.append(char)
+
+    return ''.join(cleaned)
+
+
 def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]]:
     """
     Fetch URL content with proper headers.
@@ -103,7 +123,10 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
         # Try to detect encoding
         response.encoding = response.apparent_encoding or 'utf-8'
 
-        return response.text, None
+        # Sanitize HTML to remove control characters
+        content = sanitize_html(response.text)
+
+        return content, None
 
     except requests.exceptions.Timeout:
         return None, f"Request timed out after {timeout} seconds"
@@ -396,27 +419,49 @@ def extract_html_metadata(html_content: str, url: str) -> Dict[str, Any]:
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
 
-        # Title from <title> tag
-        title_tag = soup.find('title')
-        if title_tag and title_tag.string:
-            # Clean up title (often includes site name)
-            title = title_tag.string.strip()
-            # Remove common separators with site name
-            for sep in [' | ', ' - ', ' — ', ' :: ', ' // ']:
-                if sep in title:
-                    parts = title.split(sep)
-                    # Usually the article title is the first or longest part
-                    title = max(parts, key=len).strip()
-                    break
-            metadata['title'] = title
+        # ===== TITLE EXTRACTION =====
+        # Priority 1: h1 tag (usually the main title)
+        h1_tag = soup.find('h1')
+        if h1_tag:
+            h1_text = h1_tag.get_text(strip=True)
+            if h1_text and len(h1_text) > 5 and len(h1_text) < 300:
+                metadata['title'] = h1_text
 
-        # Try to find author from common patterns
+        # Priority 2: Title from <title> tag (fallback)
+        if 'title' not in metadata:
+            title_tag = soup.find('title')
+            if title_tag:
+                title_text = title_tag.get_text(strip=True)
+                if title_text:
+                    # Clean up title (often includes site name)
+                    for sep in [' | ', ' - ', ' — ', ' :: ', ' // ', ' · ']:
+                        if sep in title_text:
+                            parts = title_text.split(sep)
+                            # Usually the article title is the first or longest part
+                            title_text = max(parts, key=len).strip()
+                            break
+                    metadata['title'] = title_text
+
+        # ===== AUTHOR EXTRACTION =====
         author_selectors = [
+            # Meta tags
             ('meta', {'name': 'author'}),
+            ('meta', {'property': 'author'}),
+            ('meta', {'name': 'article:author'}),
+            # Rel author
             ('a', {'rel': 'author'}),
-            ('span', {'class': re.compile(r'author|byline', re.I)}),
-            ('div', {'class': re.compile(r'author|byline', re.I)}),
-            ('p', {'class': re.compile(r'author|byline', re.I)}),
+            # Class-based selectors (common patterns)
+            ('span', {'class': re.compile(r'author-name|authorName|author__name', re.I)}),
+            ('a', {'class': re.compile(r'author-name|authorName|author__name', re.I)}),
+            ('div', {'class': re.compile(r'author-name|authorName|author__name', re.I)}),
+            ('span', {'class': re.compile(r'^author$|byline-author', re.I)}),
+            ('div', {'class': re.compile(r'^author$|byline-author', re.I)}),
+            ('p', {'class': re.compile(r'^author$|byline', re.I)}),
+            # Data attributes
+            ('*', {'data-author': True}),
+            # Itemprop
+            ('*', {'itemprop': 'author'}),
+            ('*', {'itemprop': 'name', 'itemtype': re.compile(r'Person', re.I)}),
         ]
 
         for tag, attrs in author_selectors:
@@ -424,35 +469,69 @@ def extract_html_metadata(html_content: str, url: str) -> Dict[str, Any]:
                 elem = soup.find(tag, attrs)
                 if elem:
                     if tag == 'meta':
-                        metadata['author'] = elem.get('content', '')
+                        author = elem.get('content', '')
+                    elif 'data-author' in attrs:
+                        author = elem.get('data-author', '')
                     else:
                         # Get text content
-                        text = elem.get_text(strip=True)
-                        # Clean up common prefixes
-                        text = re.sub(r'^(by|written by|author:?)\s*', '', text, flags=re.I)
-                        if text and len(text) < 100:  # Sanity check
-                            metadata['author'] = text
+                        author = elem.get_text(strip=True)
 
-        # Try to find date from time elements or common patterns
-        time_elem = soup.find('time')
-        if time_elem:
-            datetime_attr = time_elem.get('datetime')
-            if datetime_attr:
-                metadata['publication_date'] = datetime_attr
-            elif time_elem.string:
-                metadata['publication_date'] = time_elem.string.strip()
+                    # Clean up common prefixes
+                    author = re.sub(r'^(by|written by|author:?|posted by)\s*', '', author, flags=re.I)
+                    author = author.strip()
 
-        # Extract site name from URL if not found
+                    if author and len(author) > 1 and len(author) < 100:
+                        metadata['author'] = author
+
+        # ===== DATE EXTRACTION =====
+        date_selectors = [
+            # Time elements
+            ('time', {'datetime': True}),
+            ('time', {}),
+            # Meta tags
+            ('meta', {'property': 'article:published_time'}),
+            ('meta', {'name': 'date'}),
+            ('meta', {'name': 'publish_date'}),
+            ('meta', {'name': 'pubdate'}),
+            ('meta', {'itemprop': 'datePublished'}),
+            # Class-based
+            ('span', {'class': re.compile(r'date|publish|posted', re.I)}),
+            ('div', {'class': re.compile(r'date|publish|posted', re.I)}),
+            ('p', {'class': re.compile(r'date|publish|posted', re.I)}),
+            # Itemprop
+            ('*', {'itemprop': 'datePublished'}),
+        ]
+
+        for tag, attrs in date_selectors:
+            if 'publication_date' not in metadata:
+                elem = soup.find(tag, attrs)
+                if elem:
+                    if tag == 'time':
+                        date_val = elem.get('datetime') or elem.get_text(strip=True)
+                    elif tag == 'meta':
+                        date_val = elem.get('content', '')
+                    else:
+                        date_val = elem.get('datetime') or elem.get_text(strip=True)
+
+                    if date_val:
+                        metadata['publication_date'] = date_val.strip()
+
+        # ===== SOURCE NAME =====
         if 'source_name' not in metadata:
-            parsed = urlparse(url)
-            domain = parsed.netloc.replace('www.', '')
-            # Capitalize domain parts
-            parts = domain.split('.')
-            if parts:
-                metadata['source_name'] = parts[0].capitalize()
+            # Try og:site_name first
+            og_site = soup.find('meta', property='og:site_name')
+            if og_site and og_site.get('content'):
+                metadata['source_name'] = og_site['content']
+            else:
+                # Fall back to domain
+                parsed = urlparse(url)
+                domain = parsed.netloc.replace('www.', '')
+                parts = domain.split('.')
+                if parts:
+                    metadata['source_name'] = parts[0].capitalize()
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"      Warning: HTML metadata extraction error: {e}")
 
     return metadata
 
