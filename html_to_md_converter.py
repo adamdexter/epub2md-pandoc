@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.14"  # 1.0.14 fixes remaining RSS references, adds setuptools for Python 3.12
+CONVERTER_VERSION = "1.0.15"  # 1.0.15 fixes login detection to not navigate away from current page
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -1843,48 +1843,39 @@ def setup_medium_driver(headless: bool = False):
         return None
 
 
-def check_medium_login_status(driver) -> bool:
-    """Check if we're logged into Medium."""
+def check_medium_login_status_on_current_page(driver) -> bool:
+    """Check if we're logged into Medium based on current page (no navigation)."""
     try:
         if driver is None:
             return False
 
-        # Navigate to Medium home to check login status
-        driver.get("https://medium.com")
-        time.sleep(3)
-
-        # Check for signs of being logged in
+        # Check the current page source without navigating
         page_source = driver.page_source
         if not page_source:
             return False
 
-        page_source = page_source.lower()
+        page_source_lower = page_source.lower()
 
-        # Logged-in users typically see different elements
-        # Check for common logged-out indicators
-        logged_out_indicators = [
-            'sign in',
-            'get started',
-            'open in app',
-            'create your free account'
+        # Logged-in indicators (more reliable)
+        logged_in_indicators = [
+            'write a story',
+            'new story',
+            '"isAuthenticated":true',
+            'data-testid="headerUserButton"',
         ]
 
         # Check for logged-in indicators
-        logged_in_indicators = [
-            'write',
-            'notifications',
-            'new story'
-        ]
-
-        has_logged_out = any(ind in page_source for ind in logged_out_indicators)
-        has_logged_in = any(ind in page_source for ind in logged_in_indicators)
-
-        if has_logged_in and not has_logged_out:
+        if any(ind in page_source_lower or ind in page_source for ind in logged_in_indicators):
             return True
 
-        # Also check for user avatar or profile menu
+        # Try to find user button/avatar
         try:
-            driver.find_element(By.CSS_SELECTOR, "button[data-testid='headerUserButton'], img[alt*='profile'], .avatar")
+            driver.find_element(By.CSS_SELECTOR,
+                "button[data-testid='headerUserButton'], "
+                "[data-testid='userButton'], "
+                "img[alt*='profile' i], "
+                ".avatar"
+            )
             return True
         except:
             pass
@@ -1892,7 +1883,7 @@ def check_medium_login_status(driver) -> bool:
         return False
 
     except Exception as e:
-        print(f"      Error checking login status: {e}")
+        # Window might be closed - that's OK
         return False
 
 
@@ -1917,19 +1908,37 @@ def medium_manual_login(driver) -> bool:
         # Wait for user to log in
         start_time = time.time()
         timeout = MEDIUM_MANUAL_LOGIN_TIMEOUT
+        last_url = ""
 
         while time.time() - start_time < timeout:
             try:
                 current_url = driver.current_url or ""
-            except:
-                current_url = ""
+            except Exception as e:
+                # Window might have changed/closed - try to recover
+                print(f"      [DEBUG] URL check failed: {e}")
+                time.sleep(2)
+                continue
+
+            # Check if URL changed from login pages
+            if current_url != last_url:
+                last_url = current_url
+                print(f"      [DEBUG] URL: {current_url[:60]}...")
 
             # Check if user has navigated away from login pages
-            if current_url and '/signin' not in current_url and '/login' not in current_url:
-                # Verify we're actually logged in
-                time.sleep(2)
-                if check_medium_login_status(driver):
+            if current_url and '/signin' not in current_url and '/login' not in current_url and '/callback' not in current_url:
+                # Give the page a moment to load
+                time.sleep(3)
+
+                # Check current page for login indicators (don't navigate away!)
+                if check_medium_login_status_on_current_page(driver):
                     print("      ✓ Login successful!")
+                    save_medium_cookies(driver)
+                    return True
+
+                # Even if we can't confirm login indicators, if we're on medium.com
+                # and not on signin, we're probably logged in
+                if 'medium.com' in current_url:
+                    print("      ✓ Login appears successful (navigated away from signin)")
                     save_medium_cookies(driver)
                     return True
 
