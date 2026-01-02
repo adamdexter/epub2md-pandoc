@@ -694,34 +694,63 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
                 if traf_metadata.description:
                     metadata['description'] = traf_metadata.description
 
-            # Try markdown format first
-            content = extract(
-                html_content,
-                output_format='markdown',
-                include_links=True,
-                include_images=True,
-                include_tables=True,
-                include_formatting=True,
-                favor_precision=True,
-                deduplicate=True,
-            )
+            # Try extraction with progressively simpler parameters
+            # (trafilatura API varies between versions)
+            content = None
+
+            # Attempt 1: Full parameters with markdown
+            try:
+                content = extract(
+                    html_content,
+                    output_format='markdown',
+                    include_links=True,
+                    include_images=True,
+                    include_tables=True,
+                    include_formatting=True,
+                    favor_precision=True,
+                    deduplicate=True,
+                )
+            except (TypeError, ValueError) as e:
+                print(f"      Note: Using simplified extraction ({e})")
+
+            # Attempt 2: Simpler parameters
+            if not content:
+                try:
+                    content = extract(
+                        html_content,
+                        include_links=True,
+                        include_tables=True,
+                        deduplicate=True,
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+            # Attempt 3: Minimal parameters
+            if not content:
+                try:
+                    content = extract(html_content)
+                except Exception:
+                    pass
 
             # Validate content isn't garbage (common with SPA sites)
             if content and not is_content_valid(content):
-                print("      Warning: Markdown output appears corrupted, trying text format")
+                print("      Warning: Extracted content appears corrupted, trying text format")
                 content = None
 
             # Fallback to text format if markdown failed
             if not content:
-                text_content = extract(
-                    html_content,
-                    output_format='text',
-                    include_links=False,
-                    include_images=False,
-                    include_tables=True,
-                    favor_precision=True,
-                    deduplicate=True,
-                )
+                try:
+                    text_content = extract(
+                        html_content,
+                        output_format='txt',
+                        include_tables=True,
+                        deduplicate=True,
+                    )
+                except (TypeError, ValueError):
+                    try:
+                        text_content = extract(html_content)
+                    except Exception:
+                        text_content = None
                 if text_content and is_content_valid(text_content):
                     content = text_content
 
