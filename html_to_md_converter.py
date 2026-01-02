@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.3"  # 1.0.3 fixes trafilatura API compatibility
+CONVERTER_VERSION = "1.0.4"  # 1.0.4 adds SPA/JS-rendered site support via trafilatura fetch
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -654,12 +654,14 @@ def is_content_valid(content: str) -> bool:
     printable_count = sum(1 for c in sample if c.isprintable() or c in '\n\r\t')
     printable_ratio = printable_count / len(sample)
 
-    if printable_ratio < 0.85:
+    # Lowered threshold - SPAs might have some encoded characters
+    if printable_ratio < 0.75:
         return False
 
     # Check for actual words (not just random characters)
+    # Lowered from 20 to 10 to allow shorter content
     words = re.findall(r'\b[a-zA-Z]{3,}\b', sample)
-    if len(words) < 20:
+    if len(words) < 10:
         return False
 
     return True
@@ -813,6 +815,24 @@ def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str],
                         print(f"      Found article via {tag_name} selector")
                         article = found
                         break
+
+            # If no article found via selectors, try paragraph density detection
+            if not article:
+                print("      Trying paragraph density detection...")
+                best_div = None
+                best_p_count = 0
+
+                for div in soup.find_all('div'):
+                    paragraphs = div.find_all('p', recursive=True)
+                    # Count paragraphs with substantial text
+                    good_p = [p for p in paragraphs if len(p.get_text(strip=True)) > 50]
+                    if len(good_p) > best_p_count:
+                        best_p_count = len(good_p)
+                        best_div = div
+
+                if best_div and best_p_count >= 3:
+                    print(f"      Found div with {best_p_count} substantial paragraphs")
+                    article = best_div
 
             if article:
                 content = html_to_simple_markdown(str(article))
@@ -1401,6 +1421,30 @@ def convert_url_to_markdown(
         return False, f"Failed to fetch URL: {error}", None
 
     print(f"      Fetched {len(html_content):,} bytes")
+
+    # Check if we got actual content or just a JS shell (common with SPAs)
+    # Try a quick extraction to see if there's content
+    if TRAFILATURA_AVAILABLE:
+        test_extract = extract(html_content)
+        if not test_extract or len(test_extract) < 200:
+            print("      Page appears to be JS-rendered SPA, trying trafilatura's fetcher...")
+            try:
+                from trafilatura import fetch_url as traf_fetch
+                better_html = traf_fetch(url)
+                if better_html:
+                    # Check if trafilatura's fetch got more content
+                    test_extract2 = extract(better_html)
+                    if test_extract2 and len(test_extract2) > len(test_extract or ''):
+                        print(f"      Trafilatura fetch got {len(better_html):,} bytes with better content")
+                        html_content = better_html
+                    else:
+                        print(f"      Trafilatura fetch didn't improve content")
+                else:
+                    print("      Trafilatura fetch returned no content")
+            except Exception as e:
+                print(f"      Trafilatura fetch failed: {e}")
+        else:
+            print(f"      Initial fetch has content ({len(test_extract)} chars extracted)")
 
     # Step 2: Extract metadata from multiple sources
     print("\n[2/6] Extracting metadata...")
