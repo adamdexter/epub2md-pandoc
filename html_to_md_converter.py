@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.7"  # 1.0.7 adds ?query= pattern for Heavybit-style topic tags
+CONVERTER_VERSION = "1.0.8"  # 1.0.8 filters navigation phrases from tags
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -605,6 +605,12 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
         # Pattern 6: Look for ?query= URL patterns (Heavybit-style topic links)
         # e.g., /library?query=Hiring, /library?query=Product%20Management
         query_link_pattern = re.compile(r'\?query=', re.I)
+
+        # Navigation-style phrases to skip (not tags)
+        nav_phrase_pattern = re.compile(
+            r'^(visit|go\s*to|back\s*to|view|see|read|explore|browse|return\s*to)\s',
+            re.I
+        )
         skip_link_texts = ['all', 'more', 'view all', 'see all', 'browse', 'search', 'library']
 
         for a_tag in soup.find_all('a', href=True):
@@ -616,6 +622,7 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
                     2 < len(tag_text) < 40 and
                     tag_text.lower() not in skip_link_texts and
                     not tag_text.startswith('http') and
+                    not nav_phrase_pattern.match(tag_text) and
                     tag_text not in tags):
                     tags.append(tag_text)
 
