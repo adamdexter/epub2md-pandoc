@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urljoin
 import html
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "1.0.8"  # 1.0.8 filters navigation phrases from tags
+CONVERTER_VERSION = "1.0.9"  # 1.0.9 adds Medium RSS support for gated content
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -1580,6 +1580,246 @@ def clean_markdown_for_rag(content: str) -> str:
     return content
 
 
+# ============================================================================
+# MEDIUM RSS SUPPORT
+# Medium gates content for non-logged-in users, but RSS feeds contain full
+# article content in the content:encoded field.
+# ============================================================================
+
+def is_medium_url(url: str) -> bool:
+    """
+    Check if a URL is a Medium article.
+
+    Handles:
+    - medium.com/@username/article
+    - medium.com/publication/article
+    - username.medium.com/article
+    - Some custom domains (harder to detect)
+    """
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+
+    # Direct medium.com URLs
+    if host in ('medium.com', 'www.medium.com'):
+        return True
+
+    # Subdomain pattern: username.medium.com
+    if host.endswith('.medium.com'):
+        return True
+
+    return False
+
+
+def parse_medium_url(url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Parse a Medium URL to extract feed URL and article identifier.
+
+    Returns:
+        Tuple of (feed_url, article_slug, article_id)
+        - feed_url: The RSS feed URL to fetch
+        - article_slug: The article slug from the URL path
+        - article_id: The article ID (last part after the last dash)
+    """
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.strip('/')
+
+    if not path:
+        return None, None, None
+
+    path_parts = path.split('/')
+
+    # Extract article slug and ID
+    # Medium URLs end with: article-title-slug-abc123def456
+    # The ID is the last segment after the final dash (typically 12 chars)
+    article_slug = path_parts[-1] if path_parts else None
+    article_id = None
+
+    if article_slug and '-' in article_slug:
+        # The ID is typically the last 8-12 hex characters after the last dash
+        last_dash_idx = article_slug.rfind('-')
+        potential_id = article_slug[last_dash_idx + 1:]
+        # Medium IDs are typically 10-12 alphanumeric characters
+        if len(potential_id) >= 8 and potential_id.isalnum():
+            article_id = potential_id
+
+    # Determine feed URL based on URL pattern
+    feed_url = None
+
+    if host in ('medium.com', 'www.medium.com'):
+        if path_parts:
+            first_segment = path_parts[0]
+
+            # Pattern: medium.com/@username/article
+            if first_segment.startswith('@'):
+                feed_url = f"https://medium.com/feed/{first_segment}"
+
+            # Pattern: medium.com/publication/article
+            elif len(path_parts) >= 2:
+                # Could be a publication
+                feed_url = f"https://medium.com/feed/{first_segment}"
+
+    # Pattern: username.medium.com/article
+    elif host.endswith('.medium.com'):
+        username = host.replace('.medium.com', '')
+        feed_url = f"https://medium.com/feed/@{username}"
+
+    return feed_url, article_slug, article_id
+
+
+def fetch_medium_rss(feed_url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Fetch Medium RSS feed.
+
+    Returns:
+        Tuple of (rss_content, error_message)
+    """
+    if not REQUESTS_AVAILABLE:
+        return None, "requests library not installed"
+
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        }
+
+        response = requests.get(feed_url, headers=headers, timeout=timeout)
+        response.raise_for_status()
+
+        return response.text, None
+
+    except requests.exceptions.RequestException as e:
+        return None, f"Failed to fetch RSS feed: {str(e)}"
+
+
+def find_article_in_rss(rss_content: str, target_url: str, article_slug: str, article_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Find a specific article in the RSS feed.
+
+    Returns:
+        Dict with article data if found, None otherwise
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        # Parse RSS XML
+        root = ET.fromstring(rss_content)
+
+        # Define namespaces used in Medium RSS
+        namespaces = {
+            'content': 'http://purl.org/rss/1.0/modules/content/',
+            'dc': 'http://purl.org/dc/elements/1.1/',
+            'atom': 'http://www.w3.org/2005/Atom',
+        }
+
+        # Find all items in the feed
+        channel = root.find('channel')
+        if channel is None:
+            return None
+
+        items = channel.findall('item')
+
+        for item in items:
+            item_link = item.find('link')
+            item_guid = item.find('guid')
+
+            link_text = item_link.text if item_link is not None else ''
+            guid_text = item_guid.text if item_guid is not None else ''
+
+            # Try to match by URL, slug, or ID
+            matched = False
+
+            # Exact URL match
+            if link_text and (link_text == target_url or link_text.rstrip('/') == target_url.rstrip('/')):
+                matched = True
+
+            # Match by article ID in link or guid
+            elif article_id:
+                if article_id in link_text or article_id in guid_text:
+                    matched = True
+
+            # Match by slug (less reliable, but useful as fallback)
+            elif article_slug and article_slug in link_text:
+                matched = True
+
+            if matched:
+                # Extract article data
+                article_data = {
+                    'title': '',
+                    'author': '',
+                    'publication_date': '',
+                    'content_html': '',
+                    'link': link_text,
+                    'tags': [],
+                }
+
+                # Title
+                title_elem = item.find('title')
+                if title_elem is not None and title_elem.text:
+                    article_data['title'] = title_elem.text.strip()
+
+                # Author (dc:creator)
+                creator_elem = item.find('dc:creator', namespaces)
+                if creator_elem is not None and creator_elem.text:
+                    article_data['author'] = creator_elem.text.strip()
+
+                # Publication date
+                pubdate_elem = item.find('pubDate')
+                if pubdate_elem is not None and pubdate_elem.text:
+                    article_data['publication_date'] = pubdate_elem.text.strip()
+
+                # Content (content:encoded) - this has the full article HTML
+                content_elem = item.find('content:encoded', namespaces)
+                if content_elem is not None and content_elem.text:
+                    article_data['content_html'] = content_elem.text
+
+                # Tags (category elements)
+                for category in item.findall('category'):
+                    if category.text:
+                        article_data['tags'].append(category.text.strip())
+
+                return article_data
+
+        return None
+
+    except ET.ParseError as e:
+        print(f"      Warning: RSS parse error: {e}")
+        return None
+    except Exception as e:
+        print(f"      Warning: Error finding article in RSS: {e}")
+        return None
+
+
+def convert_medium_article(article_data: Dict[str, Any], url: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Convert Medium article data from RSS to markdown content and metadata.
+
+    Returns:
+        Tuple of (markdown_content, metadata_dict)
+    """
+    metadata = {
+        'title': article_data.get('title', ''),
+        'author': article_data.get('author', ''),
+        'source_name': 'Medium',
+    }
+
+    # Parse publication date
+    pub_date = article_data.get('publication_date', '')
+    if pub_date:
+        metadata['publication_date'] = pub_date
+
+    # Convert HTML content to markdown
+    html_content = article_data.get('content_html', '')
+
+    if html_content:
+        # Use our existing html_to_simple_markdown function
+        content = html_to_simple_markdown(html_content)
+    else:
+        content = ''
+
+    return content, metadata
+
+
 def convert_url_to_markdown(
     url: str,
     output_dir: str,
@@ -1607,13 +1847,65 @@ def convert_url_to_markdown(
     print(f"Converting: {url}")
     print('='*60)
 
-    # Step 1: Fetch the URL
-    print("\n[1/6] Fetching URL...")
-    html_content, error = fetch_url(url)
-    if error:
-        return False, f"Failed to fetch URL: {error}", None
+    # ===== MEDIUM SPECIAL HANDLING =====
+    # Medium gates content for non-logged-in users, so we try RSS first
+    medium_rss_content = None
+    medium_rss_metadata = None
+    medium_rss_tags = None
+    medium_rss_html = None  # Original HTML from RSS for image extraction
 
-    print(f"      Fetched {len(html_content):,} bytes")
+    if is_medium_url(url):
+        print("\n[Medium Detected] Trying RSS feed approach...")
+
+        feed_url, article_slug, article_id = parse_medium_url(url)
+        print(f"      Feed URL: {feed_url}")
+        print(f"      Article ID: {article_id or 'not found'}")
+
+        if feed_url:
+            rss_content, rss_error = fetch_medium_rss(feed_url)
+
+            if rss_content:
+                print(f"      Fetched RSS feed ({len(rss_content):,} bytes)")
+
+                article_data = find_article_in_rss(rss_content, url, article_slug, article_id)
+
+                if article_data:
+                    print(f"      Found article in RSS feed!")
+                    print(f"      Title: {article_data.get('title', 'Unknown')}")
+                    print(f"      Author: {article_data.get('author', 'Unknown')}")
+
+                    # Convert the article
+                    medium_rss_content, medium_rss_metadata = convert_medium_article(article_data, url)
+                    medium_rss_tags = article_data.get('tags', [])
+                    medium_rss_html = article_data.get('content_html', '')
+
+                    if medium_rss_content and len(medium_rss_content) > 200:
+                        print(f"      Extracted {len(medium_rss_content):,} chars from RSS")
+                    else:
+                        print("      RSS content too short, will try regular fetch")
+                        medium_rss_content = None
+                        medium_rss_html = None
+                else:
+                    print("      Article not found in RSS feed (may be older than feed limit)")
+                    print("      Falling back to regular fetch...")
+            else:
+                print(f"      RSS fetch failed: {rss_error}")
+                print("      Falling back to regular fetch...")
+        else:
+            print("      Could not determine RSS feed URL")
+            print("      Falling back to regular fetch...")
+
+    # Step 1: Fetch the URL (skip if we got content from Medium RSS)
+    if medium_rss_content:
+        print("\n[1/6] Using content from Medium RSS feed...")
+        html_content = medium_rss_html or ''
+    else:
+        print("\n[1/6] Fetching URL...")
+        html_content, error = fetch_url(url)
+        if error:
+            return False, f"Failed to fetch URL: {error}", None
+
+        print(f"      Fetched {len(html_content):,} bytes")
 
     # Check if we got actual content or just a JS shell (common with SPAs)
     # Try a quick extraction to see if there's content
@@ -1641,18 +1933,25 @@ def convert_url_to_markdown(
 
     # Step 2: Extract metadata from multiple sources
     print("\n[2/6] Extracting metadata...")
-    json_ld_meta = extract_json_ld_metadata(html_content)
-    og_meta = extract_opengraph_metadata(html_content)
-    spa_meta = extract_spa_metadata(html_content, url)  # SPA-specific extraction
-    html_meta = extract_html_metadata(html_content, url)
 
-    # Merge metadata (priority: JSON-LD > OpenGraph > SPA > HTML)
-    metadata = merge_metadata(json_ld_meta, og_meta, spa_meta, html_meta)
+    # If we have Medium RSS metadata, use it as primary source
+    if medium_rss_metadata:
+        metadata = medium_rss_metadata.copy()
+        tags = medium_rss_tags or []
+        print(f"      (Using metadata from Medium RSS)")
+    else:
+        json_ld_meta = extract_json_ld_metadata(html_content)
+        og_meta = extract_opengraph_metadata(html_content)
+        spa_meta = extract_spa_metadata(html_content, url)  # SPA-specific extraction
+        html_meta = extract_html_metadata(html_content, url)
 
-    # Extract tags/topics (also check SPA metadata for tags)
-    tags = extract_tags_and_topics(html_content)
-    if not tags and 'tags' in spa_meta:
-        tags = spa_meta['tags']
+        # Merge metadata (priority: JSON-LD > OpenGraph > SPA > HTML)
+        metadata = merge_metadata(json_ld_meta, og_meta, spa_meta, html_meta)
+
+        # Extract tags/topics (also check SPA metadata for tags)
+        tags = extract_tags_and_topics(html_content)
+        if not tags and 'tags' in spa_meta:
+            tags = spa_meta['tags']
 
     print(f"      Title: {metadata.get('title', 'Not found')}")
     print(f"      Author: {metadata.get('author', 'Not found')}")
@@ -1665,13 +1964,19 @@ def convert_url_to_markdown(
 
     # Step 3: Extract article content
     print("\n[3/6] Extracting article content...")
-    content, content_meta = extract_article_content(html_content, url)
 
-    if not content:
-        return False, "Failed to extract article content", None
+    # Use Medium RSS content if available
+    if medium_rss_content:
+        content = medium_rss_content
+        print(f"      Using content from Medium RSS feed")
+    else:
+        content, content_meta = extract_article_content(html_content, url)
 
-    # Merge any additional metadata from content extraction
-    metadata = merge_metadata(metadata, content_meta)
+        if not content:
+            return False, "Failed to extract article content", None
+
+        # Merge any additional metadata from content extraction
+        metadata = merge_metadata(metadata, content_meta)
 
     print(f"      Extracted {len(content):,} characters")
 
