@@ -199,22 +199,28 @@ setup_venv() {
     print_info "Installing Python dependencies..."
 
     if [ -f "requirements.txt" ]; then
-        "$VENV_DIR/bin/pip" install -r requirements.txt &> /dev/null
+        "$VENV_DIR/bin/pip" install -r requirements.txt
         if [ $? -eq 0 ]; then
             print_success "All dependencies installed successfully"
         else
             print_error "Some dependencies failed to install"
             print_info "Trying to install core dependencies individually..."
-            "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 &> /dev/null
+            "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 readability-lxml
+            # Medium support dependencies (optional but recommended)
+            print_info "Installing Medium article support (Selenium + undetected-chromedriver)..."
+            "$VENV_DIR/bin/pip" install selenium webdriver-manager undetected-chromedriver
         fi
     else
         # Fallback if requirements.txt doesn't exist
-        "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 &> /dev/null
+        "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 readability-lxml
+        # Medium support dependencies
+        print_info "Installing Medium article support..."
+        "$VENV_DIR/bin/pip" install selenium webdriver-manager undetected-chromedriver
         if [ $? -eq 0 ]; then
-            print_success "Core dependencies installed successfully"
+            print_success "All dependencies installed successfully"
         else
-            print_error "Failed to install dependencies"
-            exit 1
+            print_error "Failed to install some dependencies"
+            print_info "Core functionality will work, but Medium support may be limited"
         fi
     fi
 }
