@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EPUB to Markdown Converter</title>
+    <title>EPUB & Web to Markdown Converter</title>
     <style>
         * {
             margin: 0;
@@ -399,31 +399,156 @@
             font-size: 0.9em;
             margin-left: 10px;
         }
+
+        /* Tab Navigation */
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid #e0e0e0;
+            margin-bottom: 25px;
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 15px 20px;
+            background: none;
+            border: none;
+            font-size: 1em;
+            font-weight: 600;
+            color: #666;
+            cursor: pointer;
+            transition: all 0.3s;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -2px;
+        }
+
+        .tab-btn:hover {
+            color: #667eea;
+            background: rgba(102, 126, 234, 0.05);
+        }
+
+        .tab-btn.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .tab-btn .tab-icon {
+            margin-right: 8px;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* URL Input Specific Styles */
+        .url-input-group {
+            position: relative;
+        }
+
+        .url-input-group input {
+            padding-left: 45px;
+        }
+
+        .url-input-group::before {
+            content: "🔗";
+            position: absolute;
+            left: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 1.2em;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .checkbox-group label {
+            font-weight: normal;
+            cursor: pointer;
+        }
+
+        .dependency-warning {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            color: #856404;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .dependency-warning code {
+            background: rgba(0,0,0,0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        .success-message {
+            background: #d4edda;
+            border: 2px solid #28a745;
+            color: #155724;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            border: 2px solid #dc3545;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>📚 EPUB to Markdown Converter</h1>
-            <p>Convert your EPUB books to AI-optimized Markdown files</p>
-            <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px;">Version 2.3.0 - GUI Improvements</p>
+            <h1>📚 EPUB & Web to Markdown Converter</h1>
+            <p>Convert EPUB books and web articles to AI-optimized Markdown files</p>
+            <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px;">Version 2.4.0 - Web Article Support</p>
         </div>
 
         <div class="content">
-            <div id="pandoc-warning" class="warning">
-                <strong>⚠️ Warning:</strong> Pandoc is not installed. Please install it first:
-                <a href="https://pandoc.org/installing.html" target="_blank">https://pandoc.org/installing.html</a>
+            <!-- Tab Navigation -->
+            <div class="tabs">
+                <button type="button" class="tab-btn active" onclick="switchTab('epub')">
+                    <span class="tab-icon">📚</span>EPUB Files
+                </button>
+                <button type="button" class="tab-btn" onclick="switchTab('url')">
+                    <span class="tab-icon">🌐</span>Web Articles
+                </button>
             </div>
 
-            <!-- Drag and Drop Zone -->
-            <div id="drop-zone" class="drop-zone">
-                <div class="drop-zone-icon">📚</div>
-                <div class="drop-zone-text">Drag & Drop EPUB files here</div>
-                <div class="drop-zone-subtext">Files will be copied to your input folder for conversion</div>
-                <div id="dropped-files" class="dropped-files"></div>
-            </div>
+            <!-- EPUB Tab Content -->
+            <div id="epub-tab" class="tab-content active">
+                <div id="pandoc-warning" class="warning">
+                    <strong>⚠️ Warning:</strong> Pandoc is not installed. Please install it first:
+                    <a href="https://pandoc.org/installing.html" target="_blank">https://pandoc.org/installing.html</a>
+                </div>
 
-            <form id="converter-form">
+                <!-- Drag and Drop Zone -->
+                <div id="drop-zone" class="drop-zone">
+                    <div class="drop-zone-icon">📚</div>
+                    <div class="drop-zone-text">Drag & Drop EPUB files here</div>
+                    <div class="drop-zone-subtext">Files will be copied to your input folder for conversion</div>
+                    <div id="dropped-files" class="dropped-files"></div>
+                </div>
+
+                <form id="converter-form">
                 <div class="form-group">
                     <label for="input-folder">Input Folder (containing EPUB files)</label>
                     <div class="folder-input-group">
@@ -464,16 +589,86 @@
                 </div>
             </div>
 
-            <div class="features">
-                <h3>Features</h3>
-                <ul>
-                    <li>Batch processes all EPUB files in a folder</li>
-                    <li>Extracts metadata (title, author, year, edition)</li>
-                    <li>Creates AI-optimized filenames for easy reference</li>
-                    <li>Preserves document structure and hierarchy</li>
-                    <li>Outputs clean Markdown with ATX-style headings</li>
-                    <li>Extracts embedded images</li>
-                </ul>
+                <div class="features">
+                    <h3>EPUB Conversion Features</h3>
+                    <ul>
+                        <li>Batch processes all EPUB files in a folder</li>
+                        <li>Extracts metadata (title, author, year, edition)</li>
+                        <li>Creates AI-optimized filenames for easy reference</li>
+                        <li>Preserves document structure and hierarchy</li>
+                        <li>Outputs clean Markdown with ATX-style headings</li>
+                        <li>Extracts embedded images</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- URL Tab Content -->
+            <div id="url-tab" class="tab-content">
+                <div id="html-converter-warning" class="dependency-warning" style="display: none;">
+                    <strong>⚠️ Missing Dependencies:</strong> Web article conversion requires additional Python packages.
+                    <br><br>
+                    Install them with: <code>pip install trafilatura beautifulsoup4 requests</code>
+                </div>
+
+                <form id="url-converter-form">
+                    <div class="form-group">
+                        <label for="article-url">Article URL</label>
+                        <div class="url-input-group">
+                            <input type="url" id="article-url" placeholder="https://example.com/blog/article" required>
+                        </div>
+                        <div class="help-text">Enter the URL of a blog post, news article, or web page to convert</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="url-output-folder">Output Folder</label>
+                        <div class="folder-input-group">
+                            <input type="text" id="url-output-folder" value="converted_articles" required>
+                            <button type="button" class="btn btn-secondary" onclick="browseFolder('url-output')">Browse</button>
+                        </div>
+                        <div class="help-text">Choose where to save the converted Markdown file and images</div>
+                    </div>
+
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="download-images" checked>
+                        <label for="download-images">Download images locally (recommended for Claude Projects)</label>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary" id="convert-url-btn">
+                        Convert Web Article to Markdown
+                    </button>
+                </form>
+
+                <div id="url-progress-container" class="progress-container">
+                    <div class="progress-header">
+                        <h3>Conversion Progress</h3>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span id="url-status-badge" class="status-badge status-running">
+                                <span class="spinner"></span> Running...
+                            </span>
+                            <button type="button" class="btn btn-secondary copy-btn" onclick="copyUrlLogs()" title="Copy logs to clipboard">
+                                Copy Logs
+                            </button>
+                        </div>
+                    </div>
+                    <div class="progress-log" id="url-progress-log">
+                        <p>Starting conversion...</p>
+                    </div>
+                    <div id="url-result-message"></div>
+                </div>
+
+                <div class="features">
+                    <h3>Web Article Conversion Features</h3>
+                    <ul>
+                        <li>Extracts clean article content (removes ads, navigation, etc.)</li>
+                        <li>Captures metadata: author, publication date, source URL</li>
+                        <li>Downloads images locally for Claude Projects</li>
+                        <li>Extracts tags and topics if available</li>
+                        <li>Generates table of contents from article headings</li>
+                        <li>Estimates reading time for RAG context</li>
+                        <li>Creates AI-optimized YAML frontmatter</li>
+                        <li>Filename format: Author - Title - Source.md</li>
+                    </ul>
+                </div>
             </div>
         </div>
     </div>
@@ -496,8 +691,20 @@
         let currentBrowseTarget = 'input';
         let currentPath = '';
         let nativeDialogAvailable = true;
+        let htmlConverterAvailable = true;
 
-        // Check Pandoc installation and load preferences on page load
+        // ========== Tab Switching ==========
+        function switchTab(tab) {
+            // Update tab buttons
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.closest('.tab-btn').classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(tab + '-tab').classList.add('active');
+        }
+
+        // Check Pandoc, HTML converter, and load preferences on page load
         window.addEventListener('DOMContentLoaded', async () => {
             // Check Pandoc
             try {
@@ -512,6 +719,20 @@
                 console.error('Error checking Pandoc:', error);
             }
 
+            // Check HTML converter availability
+            try {
+                const response = await fetch('/check_html_converter');
+                const data = await response.json();
+
+                if (!data.available) {
+                    htmlConverterAvailable = false;
+                    document.getElementById('html-converter-warning').style.display = 'block';
+                    document.getElementById('convert-url-btn').disabled = true;
+                }
+            } catch (error) {
+                console.error('Error checking HTML converter:', error);
+            }
+
             // Load saved preferences
             try {
                 const response = await fetch('/get_preferences');
@@ -522,6 +743,9 @@
 
                 // Set output folder (to saved value or Downloads folder)
                 document.getElementById('output-folder').value = prefs.output_folder || 'md processed books';
+
+                // Set URL output folder
+                document.getElementById('url-output-folder').value = prefs.url_output_folder || 'converted_articles';
             } catch (error) {
                 console.error('Error loading preferences:', error);
             }
@@ -535,7 +759,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         input_folder: document.getElementById('input-folder').value,
-                        output_folder: document.getElementById('output-folder').value
+                        output_folder: document.getElementById('output-folder').value,
+                        url_output_folder: document.getElementById('url-output-folder').value
                     })
                 });
             } catch (error) {
@@ -870,7 +1095,150 @@
                 await navigator.clipboard.writeText(logText);
 
                 // Visual feedback
-                const copyBtn = document.querySelector('.copy-btn');
+                const copyBtn = document.querySelector('#epub-tab .copy-btn');
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = 'Copied!';
+                copyBtn.style.background = '#28a745';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                    copyBtn.style.background = '';
+                }, 2000);
+            } catch (error) {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = logText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+
+                alert('Logs copied to clipboard!');
+            }
+        }
+
+        // ========== URL Conversion Handlers ==========
+
+        // Handle URL form submission
+        document.getElementById('url-converter-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const url = document.getElementById('article-url').value.trim();
+            const outputFolder = document.getElementById('url-output-folder').value;
+            const downloadImages = document.getElementById('download-images').checked;
+
+            if (!url) {
+                alert('Please enter a URL');
+                return;
+            }
+
+            // Disable form
+            document.getElementById('convert-url-btn').disabled = true;
+            document.getElementById('convert-url-btn').innerHTML = '<span class="spinner"></span> Converting...';
+
+            // Show progress container
+            document.getElementById('url-progress-container').classList.add('show');
+            document.getElementById('url-progress-log').innerHTML = '<p>Starting conversion...</p>';
+            document.getElementById('url-result-message').innerHTML = '';
+            document.getElementById('url-status-badge').className = 'status-badge status-running';
+            document.getElementById('url-status-badge').innerHTML = '<span class="spinner"></span> Running...';
+
+            try {
+                // Start conversion
+                const response = await fetch('/convert_url', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        output_folder: outputFolder,
+                        download_images: downloadImages
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    alert('Error: ' + error.error);
+                    document.getElementById('convert-url-btn').disabled = false;
+                    document.getElementById('convert-url-btn').innerHTML = 'Convert Web Article to Markdown';
+                    return;
+                }
+
+                // Save preferences for next time
+                savePreferences();
+
+                // Poll for status updates
+                pollUrlStatus();
+
+            } catch (error) {
+                alert('Error starting conversion: ' + error);
+                document.getElementById('convert-url-btn').disabled = false;
+                document.getElementById('convert-url-btn').innerHTML = 'Convert Web Article to Markdown';
+            }
+        });
+
+        // Poll URL conversion status
+        async function pollUrlStatus() {
+            try {
+                const response = await fetch('/url_status');
+                const data = await response.json();
+
+                // Update progress log
+                const logContainer = document.getElementById('url-progress-log');
+                logContainer.innerHTML = '';
+                data.progress.forEach(line => {
+                    const p = document.createElement('p');
+                    p.textContent = line;
+                    logContainer.appendChild(p);
+                });
+                logContainer.scrollTop = logContainer.scrollHeight;
+
+                // Check if completed
+                if (data.completed) {
+                    document.getElementById('url-status-badge').className = 'status-badge status-complete';
+                    document.getElementById('url-status-badge').innerHTML = '✓ Complete';
+                    document.getElementById('convert-url-btn').disabled = false;
+                    document.getElementById('convert-url-btn').innerHTML = 'Convert Web Article to Markdown';
+
+                    // Show result message
+                    const resultDiv = document.getElementById('url-result-message');
+                    if (data.success) {
+                        resultDiv.innerHTML = `
+                            <div class="success-message">
+                                <strong>✓ Success!</strong> Article converted successfully.
+                                <br><br>
+                                <strong>Output file:</strong> ${data.output_file}
+                            </div>
+                        `;
+                    } else {
+                        resultDiv.innerHTML = `
+                            <div class="error-message">
+                                <strong>✗ Error:</strong> ${data.error || 'Conversion failed'}
+                            </div>
+                        `;
+                    }
+                } else if (data.running) {
+                    // Continue polling
+                    setTimeout(pollUrlStatus, 500);
+                }
+
+            } catch (error) {
+                console.error('Error polling URL status:', error);
+                setTimeout(pollUrlStatus, 1000);
+            }
+        }
+
+        // Copy URL logs
+        async function copyUrlLogs() {
+            const logContainer = document.getElementById('url-progress-log');
+            const logText = logContainer.innerText;
+
+            try {
+                await navigator.clipboard.writeText(logText);
+
+                // Visual feedback
+                const copyBtn = document.querySelector('#url-tab .copy-btn');
                 const originalText = copyBtn.textContent;
                 copyBtn.textContent = 'Copied!';
                 copyBtn.style.background = '#28a745';

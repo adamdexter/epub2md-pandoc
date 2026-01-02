@@ -1,11 +1,11 @@
 #!/bin/bash
-# EPUB to Markdown Converter - Installer Script
+# EPUB & Web to Markdown Converter - Installer Script
 # Automatically installs all dependencies for the converter
 
 set -e  # Exit on error
 
 echo "=========================================="
-echo "EPUB to Markdown Converter - Installer"
+echo "EPUB & Web to Markdown Converter - Installer"
 echo "=========================================="
 echo ""
 
@@ -164,7 +164,7 @@ install_zenity() {
     print_success "zenity installed successfully"
 }
 
-# Create virtual environment and install Flask
+# Create virtual environment and install dependencies
 setup_venv() {
     echo ""
     echo "Setting up virtual environment..."
@@ -191,17 +191,31 @@ setup_venv() {
         print_success "Virtual environment created"
     fi
 
-    # Activate venv and install Flask
-    print_info "Installing Flask in virtual environment..."
+    # Upgrade pip first
+    print_info "Upgrading pip..."
+    "$VENV_DIR/bin/pip" install --upgrade pip &> /dev/null
 
-    # Use venv's pip directly (works without activation)
-    "$VENV_DIR/bin/pip" install flask &> /dev/null
+    # Install all dependencies from requirements.txt
+    print_info "Installing Python dependencies..."
 
-    if [ $? -eq 0 ]; then
-        print_success "Flask installed successfully in virtual environment"
+    if [ -f "requirements.txt" ]; then
+        "$VENV_DIR/bin/pip" install -r requirements.txt &> /dev/null
+        if [ $? -eq 0 ]; then
+            print_success "All dependencies installed successfully"
+        else
+            print_error "Some dependencies failed to install"
+            print_info "Trying to install core dependencies individually..."
+            "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 &> /dev/null
+        fi
     else
-        print_error "Failed to install Flask"
-        exit 1
+        # Fallback if requirements.txt doesn't exist
+        "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 &> /dev/null
+        if [ $? -eq 0 ]; then
+            print_success "Core dependencies installed successfully"
+        else
+            print_error "Failed to install dependencies"
+            exit 1
+        fi
     fi
 }
 
@@ -211,6 +225,9 @@ make_executable() {
     echo "Making scripts executable..."
 
     chmod +x epub_to_md_converter.py
+    if [ -f "html_to_md_converter.py" ]; then
+        chmod +x html_to_md_converter.py
+    fi
     if [ -f "gui.py" ]; then
         chmod +x gui.py
     fi
@@ -295,15 +312,18 @@ main() {
     print_success "Installation complete!"
     echo "=========================================="
     echo ""
-    echo "You can now use the converter in two ways:"
+    echo "You can now use the converter in several ways:"
     echo ""
-    echo "1. Command line:"
-    echo "   ./epub_to_md_converter.py /path/to/epub/folder"
-    echo ""
-    echo "2. GUI (recommended):"
+    echo "1. GUI (recommended):"
     echo "   ./run_gui.sh"
     echo "   Then open http://localhost:3763 in your browser"
     echo "   (Port 3763 = 'EPMD' on phone keypad - easy to remember!)"
+    echo ""
+    echo "2. Command line - EPUB conversion:"
+    echo "   ./epub_to_md_converter.py /path/to/epub/folder"
+    echo ""
+    echo "3. Command line - Web article conversion:"
+    echo "   python3 html_to_md_converter.py https://example.com/article"
     echo ""
 }
 
