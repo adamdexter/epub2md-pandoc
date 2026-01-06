@@ -517,9 +517,9 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>📚 EPUB & Web to Markdown Converter</h1>
-            <p>Convert EPUB books and web articles to AI-optimized Markdown files</p>
-            <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px;">Version 2.5.15 - Medium Module Refactor</p>
+            <h1>📚 EPUB, Web & PDF to Markdown Converter</h1>
+            <p>Convert EPUB books, web articles, and PDF documents to AI-optimized Markdown files</p>
+            <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px;">Version 2.6.0 - PDF Support Added</p>
         </div>
 
         <div class="content">
@@ -530,6 +530,9 @@
                 </button>
                 <button type="button" class="tab-btn" onclick="switchTab('url')">
                     <span class="tab-icon">🌐</span>Web Articles
+                </button>
+                <button type="button" class="tab-btn" onclick="switchTab('pdf')">
+                    <span class="tab-icon">📄</span>PDF Documents
                 </button>
             </div>
 
@@ -670,6 +673,88 @@
                     </ul>
                 </div>
             </div>
+
+            <!-- PDF Tab Content -->
+            <div id="pdf-tab" class="tab-content">
+                <div id="pdf-converter-warning" class="dependency-warning" style="display: none;">
+                    <strong>Missing Dependencies:</strong> PDF conversion requires additional Python packages.
+                    <br><br>
+                    Install them with: <code>pip install pymupdf pdfplumber Pillow</code>
+                </div>
+
+                <!-- Drag and Drop Zone for PDFs -->
+                <div id="pdf-drop-zone" class="drop-zone">
+                    <div class="drop-zone-icon">📄</div>
+                    <div class="drop-zone-text">Drag & Drop a PDF file here</div>
+                    <div class="drop-zone-subtext">Or enter the file path below</div>
+                    <div id="pdf-dropped-file" class="dropped-files"></div>
+                </div>
+
+                <form id="pdf-converter-form">
+                    <div class="form-group">
+                        <label for="pdf-file-path">PDF File Path</label>
+                        <div class="folder-input-group">
+                            <input type="text" id="pdf-file-path" placeholder="/path/to/document.pdf" required>
+                            <button type="button" class="btn btn-secondary" onclick="browsePdfFile()">Browse</button>
+                        </div>
+                        <div class="help-text">Select or enter the path to a PDF file to convert</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="pdf-output-folder">Output Folder</label>
+                        <div class="folder-input-group">
+                            <input type="text" id="pdf-output-folder" value="converted_pdfs" required>
+                            <button type="button" class="btn btn-secondary" onclick="browseFolder('pdf-output')">Browse</button>
+                        </div>
+                        <div class="help-text">Choose where to save the converted Markdown file</div>
+                    </div>
+
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="accuracy-critical">
+                        <label for="accuracy-critical">Accuracy Critical (for financial/scientific documents)</label>
+                    </div>
+                    <div class="help-text" style="margin-top: -10px; margin-bottom: 15px;">
+                        Uses stricter quality threshold (93% vs 85%) and may try multiple extraction tools
+                    </div>
+
+                    <button type="submit" class="btn btn-primary" id="convert-pdf-btn">
+                        Convert PDF to Markdown
+                    </button>
+                </form>
+
+                <div id="pdf-progress-container" class="progress-container">
+                    <div class="progress-header">
+                        <h3>Conversion Progress</h3>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span id="pdf-status-badge" class="status-badge status-running">
+                                <span class="spinner"></span> Running...
+                            </span>
+                            <button type="button" class="btn btn-secondary copy-btn" onclick="copyPdfLogs()" title="Copy logs to clipboard">
+                                Copy Logs
+                            </button>
+                        </div>
+                    </div>
+                    <div class="progress-log" id="pdf-progress-log">
+                        <p>Starting conversion...</p>
+                    </div>
+                    <div id="pdf-result-message"></div>
+                </div>
+
+                <div class="features">
+                    <h3>PDF Conversion Features</h3>
+                    <ul>
+                        <li>Analyzes PDF structure to choose optimal extraction tool</li>
+                        <li>Supports native PDFs, scanned documents (OCR), and mixed layouts</li>
+                        <li>Intelligent table extraction with markdown formatting</li>
+                        <li>Converts figures/charts to descriptive text blocks</li>
+                        <li>Quality scoring with automatic fallback to better tools</li>
+                        <li>Extracts metadata: title, author, creation date</li>
+                        <li>Generates table of contents from document headings</li>
+                        <li>RAG-optimized output with YAML frontmatter</li>
+                        <li>Filename format: Author - Title.md</li>
+                    </ul>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -692,6 +777,7 @@
         let currentPath = '';
         let nativeDialogAvailable = true;
         let htmlConverterAvailable = true;
+        let pdfConverterAvailable = true;
 
         // ========== Tab Switching ==========
         function switchTab(tab) {
@@ -733,6 +819,20 @@
                 console.error('Error checking HTML converter:', error);
             }
 
+            // Check PDF converter availability
+            try {
+                const response = await fetch('/check_pdf_converter');
+                const data = await response.json();
+
+                if (!data.available) {
+                    pdfConverterAvailable = false;
+                    document.getElementById('pdf-converter-warning').style.display = 'block';
+                    document.getElementById('convert-pdf-btn').disabled = true;
+                }
+            } catch (error) {
+                console.error('Error checking PDF converter:', error);
+            }
+
             // Load saved preferences
             try {
                 const response = await fetch('/get_preferences');
@@ -746,6 +846,9 @@
 
                 // Set URL output folder
                 document.getElementById('url-output-folder').value = prefs.url_output_folder || 'converted_articles';
+
+                // Set PDF output folder
+                document.getElementById('pdf-output-folder').value = prefs.pdf_output_folder || 'converted_pdfs';
             } catch (error) {
                 console.error('Error loading preferences:', error);
             }
@@ -760,7 +863,8 @@
                     body: JSON.stringify({
                         input_folder: document.getElementById('input-folder').value,
                         output_folder: document.getElementById('output-folder').value,
-                        url_output_folder: document.getElementById('url-output-folder').value
+                        url_output_folder: document.getElementById('url-output-folder').value,
+                        pdf_output_folder: document.getElementById('pdf-output-folder').value
                     })
                 });
             } catch (error) {
@@ -1258,6 +1362,245 @@
 
                 alert('Logs copied to clipboard!');
             }
+        }
+
+        // ========== PDF Conversion Handlers ==========
+        let pdfDroppedFile = null;
+
+        // Handle PDF form submission
+        document.getElementById('pdf-converter-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const pdfPath = document.getElementById('pdf-file-path').value.trim();
+            const outputFolder = document.getElementById('pdf-output-folder').value;
+            const accuracyCritical = document.getElementById('accuracy-critical').checked;
+
+            if (!pdfPath) {
+                alert('Please select or enter a PDF file path');
+                return;
+            }
+
+            // Disable form
+            document.getElementById('convert-pdf-btn').disabled = true;
+            document.getElementById('convert-pdf-btn').innerHTML = '<span class="spinner"></span> Converting...';
+
+            // Show progress container
+            document.getElementById('pdf-progress-container').classList.add('show');
+            document.getElementById('pdf-progress-log').innerHTML = '<p>Starting conversion...</p>';
+            document.getElementById('pdf-result-message').innerHTML = '';
+            document.getElementById('pdf-status-badge').className = 'status-badge status-running';
+            document.getElementById('pdf-status-badge').innerHTML = '<span class="spinner"></span> Running...';
+
+            try {
+                // Start conversion
+                const response = await fetch('/convert_pdf', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        pdf_path: pdfPath,
+                        output_folder: outputFolder,
+                        accuracy_critical: accuracyCritical
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    alert('Error: ' + error.error);
+                    document.getElementById('convert-pdf-btn').disabled = false;
+                    document.getElementById('convert-pdf-btn').innerHTML = 'Convert PDF to Markdown';
+                    return;
+                }
+
+                // Save preferences for next time
+                savePreferences();
+
+                // Poll for status updates
+                pollPdfStatus();
+
+            } catch (error) {
+                alert('Error starting conversion: ' + error);
+                document.getElementById('convert-pdf-btn').disabled = false;
+                document.getElementById('convert-pdf-btn').innerHTML = 'Convert PDF to Markdown';
+            }
+        });
+
+        // Poll PDF conversion status
+        async function pollPdfStatus() {
+            try {
+                const response = await fetch('/pdf_status');
+                const data = await response.json();
+
+                // Update progress log
+                const logContainer = document.getElementById('pdf-progress-log');
+                logContainer.innerHTML = '';
+                data.progress.forEach(line => {
+                    const p = document.createElement('p');
+                    p.textContent = line;
+                    logContainer.appendChild(p);
+                });
+                logContainer.scrollTop = logContainer.scrollHeight;
+
+                // Check if completed
+                if (data.completed) {
+                    document.getElementById('pdf-status-badge').className = 'status-badge status-complete';
+                    document.getElementById('pdf-status-badge').innerHTML = '✓ Complete';
+                    document.getElementById('convert-pdf-btn').disabled = false;
+                    document.getElementById('convert-pdf-btn').innerHTML = 'Convert PDF to Markdown';
+
+                    // Show result message
+                    const resultDiv = document.getElementById('pdf-result-message');
+                    if (data.success) {
+                        resultDiv.innerHTML = `
+                            <div class="success-message">
+                                <strong>✓ Success!</strong> PDF converted successfully.
+                                <br><br>
+                                <strong>Output file:</strong> ${data.output_file}
+                            </div>
+                        `;
+                    } else {
+                        resultDiv.innerHTML = `
+                            <div class="error-message">
+                                <strong>✗ Error:</strong> ${data.error || 'Conversion failed'}
+                            </div>
+                        `;
+                    }
+                } else if (data.running) {
+                    // Continue polling
+                    setTimeout(pollPdfStatus, 500);
+                }
+
+            } catch (error) {
+                console.error('Error polling PDF status:', error);
+                setTimeout(pollPdfStatus, 1000);
+            }
+        }
+
+        // Copy PDF logs
+        async function copyPdfLogs() {
+            const logContainer = document.getElementById('pdf-progress-log');
+            const logText = logContainer.innerText;
+
+            try {
+                await navigator.clipboard.writeText(logText);
+
+                // Visual feedback
+                const copyBtn = document.querySelector('#pdf-tab .copy-btn');
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = 'Copied!';
+                copyBtn.style.background = '#28a745';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                    copyBtn.style.background = '';
+                }, 2000);
+            } catch (error) {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = logText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+
+                alert('Logs copied to clipboard!');
+            }
+        }
+
+        // PDF Drag and Drop
+        const pdfDropZone = document.getElementById('pdf-drop-zone');
+        const pdfDroppedFileContainer = document.getElementById('pdf-dropped-file');
+
+        // Highlight drop zone when dragging over it
+        ['dragenter', 'dragover'].forEach(eventName => {
+            pdfDropZone.addEventListener(eventName, () => {
+                pdfDropZone.classList.add('drag-over');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            pdfDropZone.addEventListener(eventName, () => {
+                pdfDropZone.classList.remove('drag-over');
+            }, false);
+        });
+
+        // Handle PDF drop
+        pdfDropZone.addEventListener('drop', handlePdfDrop, false);
+
+        async function handlePdfDrop(e) {
+            const dt = e.dataTransfer;
+            const files = [...dt.files];
+
+            // Filter only .pdf files and take first one
+            const pdfFiles = files.filter(file => file.name.toLowerCase().endsWith('.pdf'));
+
+            if (pdfFiles.length === 0) {
+                alert('Please drop a PDF file (.pdf extension)');
+                return;
+            }
+
+            const file = pdfFiles[0]; // Only take first PDF
+
+            // Upload to temp location
+            await uploadPdfFile(file);
+        }
+
+        async function uploadPdfFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('target_folder', ''); // Will use temp dir
+
+            try {
+                const response = await fetch('/upload_pdf', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    pdfDroppedFile = {
+                        name: file.name,
+                        path: data.path
+                    };
+                    // Update file path input
+                    document.getElementById('pdf-file-path').value = data.path;
+                    updatePdfDroppedFileDisplay();
+                } else {
+                    alert('Error uploading PDF: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error uploading PDF: ' + error);
+            }
+        }
+
+        function updatePdfDroppedFileDisplay() {
+            pdfDroppedFileContainer.innerHTML = '';
+
+            if (!pdfDroppedFile) {
+                return;
+            }
+
+            const div = document.createElement('div');
+            div.className = 'dropped-file';
+            div.innerHTML = `
+                <span class="dropped-file-name">📄 ${pdfDroppedFile.name}</span>
+                <button class="remove-file" onclick="removePdfDroppedFile()" title="Remove file">&times;</button>
+            `;
+            pdfDroppedFileContainer.appendChild(div);
+        }
+
+        function removePdfDroppedFile() {
+            pdfDroppedFile = null;
+            document.getElementById('pdf-file-path').value = '';
+            updatePdfDroppedFileDisplay();
+        }
+
+        // Browse for PDF file (placeholder - uses same folder browser as fallback)
+        function browsePdfFile() {
+            // For now, just use the folder browser and ask user to enter filename
+            alert('Please enter the full path to your PDF file, or drag and drop it into the drop zone above.');
         }
     </script>
 </body>

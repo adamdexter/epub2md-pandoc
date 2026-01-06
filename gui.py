@@ -7,6 +7,7 @@ A Flask-based web interface for converting EPUBs and web articles to AI-optimize
 import os
 import sys
 import json
+import tempfile
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify
 from epub_to_md_converter import process_folder, check_pandoc_installed
@@ -26,6 +27,19 @@ try:
         HTML_DEPENDENCIES_MISSING = missing
 except ImportError as e:
     HTML_DEPENDENCIES_MISSING = ['html_to_md_converter module']
+
+# Try to import PDF converter (may not be available if dependencies missing)
+PDF_CONVERTER_AVAILABLE = False
+PDF_DEPENDENCIES_MISSING = []
+try:
+    from pdf_to_md_converter import convert_pdf_to_markdown, check_dependencies as check_pdf_dependencies
+    pdf_deps_ok, pdf_missing = check_pdf_dependencies()
+    if pdf_deps_ok:
+        PDF_CONVERTER_AVAILABLE = True
+    else:
+        PDF_DEPENDENCIES_MISSING = pdf_missing
+except ImportError as e:
+    PDF_DEPENDENCIES_MISSING = ['pdf_to_md_converter module']
 
 # Preferences file location (in user's home directory)
 PREFERENCES_FILE = os.path.join(os.path.expanduser('~'), '.epub2md_preferences.json')
@@ -74,6 +88,16 @@ conversion_status = {
 
 # Global variables for URL conversion status
 url_conversion_status = {
+    'running': False,
+    'progress': [],
+    'completed': False,
+    'success': False,
+    'output_file': None,
+    'error': None
+}
+
+# Global variables for PDF conversion status
+pdf_conversion_status = {
     'running': False,
     'progress': [],
     'completed': False,
@@ -515,6 +539,157 @@ def convert_url():
 def url_status():
     """Get URL conversion status"""
     return jsonify(url_conversion_status)
+
+
+# ============================================================
+# PDF to Markdown Conversion Routes
+# ============================================================
+
+@app.route('/check_pdf_converter')
+def check_pdf_converter():
+    """Check if PDF converter is available and dependencies are installed"""
+    return jsonify({
+        'available': PDF_CONVERTER_AVAILABLE,
+        'missing_dependencies': PDF_DEPENDENCIES_MISSING
+    })
+
+
+@app.route('/convert_pdf', methods=['POST'])
+def convert_pdf():
+    """Start PDF to Markdown conversion"""
+    global pdf_conversion_status
+
+    if not PDF_CONVERTER_AVAILABLE:
+        return jsonify({
+            'error': f'PDF converter not available. Missing dependencies: {", ".join(PDF_DEPENDENCIES_MISSING)}'
+        }), 400
+
+    data = request.json
+    output_folder = data.get('output_folder', 'converted_pdfs')
+    accuracy_critical = data.get('accuracy_critical', False)
+
+    # Handle file path from form
+    pdf_path = data.get('pdf_path', '').strip()
+
+    if not pdf_path:
+        return jsonify({'error': 'PDF file path is required'}), 400
+
+    # Validate file exists
+    pdf_path = os.path.expanduser(pdf_path)
+    if not os.path.exists(pdf_path):
+        return jsonify({'error': f'PDF file not found: {pdf_path}'}), 400
+
+    if not pdf_path.lower().endswith('.pdf'):
+        return jsonify({'error': 'File must be a PDF'}), 400
+
+    # Reset status
+    pdf_conversion_status = {
+        'running': True,
+        'progress': [],
+        'completed': False,
+        'success': False,
+        'output_file': None,
+        'error': None
+    }
+
+    # Run conversion in background thread
+    def run_pdf_conversion():
+        global pdf_conversion_status
+        try:
+            # Capture output
+            old_stdout = sys.stdout
+
+            class PDFOutputCapture:
+                def __init__(self):
+                    self.queue = queue.Queue()
+
+                def write(self, text):
+                    if text.strip():
+                        self.queue.put(text)
+                        pdf_conversion_status['progress'].append(text)
+                    sys.__stdout__.write(text)
+
+                def flush(self):
+                    sys.__stdout__.flush()
+
+            sys.stdout = PDFOutputCapture()
+
+            # Run conversion
+            success, message, output_path = convert_pdf_to_markdown(
+                pdf_path=pdf_path,
+                output_dir=output_folder,
+                accuracy_critical=accuracy_critical
+            )
+
+            # Restore stdout
+            sys.stdout = old_stdout
+
+            pdf_conversion_status['success'] = success
+            pdf_conversion_status['output_file'] = output_path
+            if not success:
+                pdf_conversion_status['error'] = message
+            pdf_conversion_status['completed'] = True
+            pdf_conversion_status['running'] = False
+
+        except Exception as e:
+            pdf_conversion_status['progress'].append(f"Error: {str(e)}")
+            pdf_conversion_status['error'] = str(e)
+            pdf_conversion_status['running'] = False
+            pdf_conversion_status['completed'] = True
+
+    thread = threading.Thread(target=run_pdf_conversion)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'status': 'started'})
+
+
+@app.route('/pdf_status')
+def pdf_status():
+    """Get PDF conversion status"""
+    return jsonify(pdf_conversion_status)
+
+
+@app.route('/upload_pdf', methods=['POST'])
+def upload_pdf():
+    """Handle PDF file upload from drag and drop"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided', 'success': False}), 400
+
+    file = request.files['file']
+    target_folder = request.form.get('target_folder', '')
+
+    if not file.filename:
+        return jsonify({'error': 'No file selected', 'success': False}), 400
+
+    # Validate file extension
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Only PDF files are allowed', 'success': False}), 400
+
+    try:
+        # Expand and validate target folder
+        if target_folder:
+            target_folder = os.path.expanduser(target_folder)
+        else:
+            # Use temp directory if no target specified
+            target_folder = tempfile.gettempdir()
+
+        # Create folder if it doesn't exist
+        if not os.path.exists(target_folder):
+            os.makedirs(target_folder)
+
+        # Save file
+        file_path = os.path.join(target_folder, file.filename)
+        file.save(file_path)
+
+        return jsonify({
+            'success': True,
+            'path': file_path,
+            'filename': file.filename
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e), 'success': False}), 500
 
 
 def main():

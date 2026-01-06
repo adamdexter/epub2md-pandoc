@@ -1,4 +1,4 @@
-# EPUB & Web to Markdown Converter - Python Dependencies
+# EPUB, Web, & PDF to Markdown Converter - Python Dependencies
 
 # Core GUI
 flask>=2.0.0
@@ -16,3 +16,12 @@ selenium>=4.0.0
 webdriver-manager>=4.0.0
 setuptools>=65.0.0  # Required for undetected-chromedriver on Python 3.12+ (provides distutils)
 undetected-chromedriver>=3.5.0  # Best for bypassing Cloudflare detection
+
+# PDF Conversion (pdf_to_md_converter.py)
+pymupdf>=1.23.0          # Fast text extraction, good control
+pdfplumber>=0.10.0       # Excellent table extraction
+Pillow>=10.0.0           # Image processing for OCR
+
+# Optional PDF tools (for enhanced quality)
+# marker-pdf>=0.2.0      # Best overall quality, layout-aware (large install, GPU recommended)
+# pytesseract>=0.3.10    # OCR for scanned documents (requires tesseract system package)
