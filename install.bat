@@ -1,9 +1,10 @@
 @echo off
-REM EPUB to Markdown Converter - Windows Installer Script
+REM EPUB, Web & PDF to Markdown Converter - Windows Installer Script
 REM Automatically installs all dependencies for the converter
 
 echo ==========================================
-echo EPUB to Markdown Converter - Installer
+echo EPUB, Web ^& PDF to Markdown Converter
+echo           Installer v2.6.0
 echo ==========================================
 echo.
 
@@ -72,12 +73,16 @@ if exist requirements.txt (
         .venv\Scripts\python.exe -m pip install flask requests trafilatura beautifulsoup4 readability-lxml
         echo [INFO] Installing Medium article support...
         .venv\Scripts\python.exe -m pip install setuptools selenium webdriver-manager undetected-chromedriver
+        echo [INFO] Installing PDF conversion support...
+        .venv\Scripts\python.exe -m pip install pymupdf pdfplumber Pillow
     )
 ) else (
     echo [INFO] requirements.txt not found, installing core dependencies...
     .venv\Scripts\python.exe -m pip install flask requests trafilatura beautifulsoup4 readability-lxml
     echo [INFO] Installing Medium article support...
     .venv\Scripts\python.exe -m pip install setuptools selenium webdriver-manager undetected-chromedriver
+    echo [INFO] Installing PDF conversion support...
+    .venv\Scripts\python.exe -m pip install pymupdf pdfplumber Pillow
 )
 echo [OK] Dependencies installed
 
@@ -106,14 +111,21 @@ echo ==========================================
 echo Installation complete!
 echo ==========================================
 echo.
-echo You can now use the converter in two ways:
+echo You can now use the converter in several ways:
 echo.
-echo 1. Command line:
-echo    python epub_to_md_converter.py C:\path\to\epub\folder
-echo.
-echo 2. GUI (recommended):
+echo 1. GUI (recommended):
 echo    run_gui.bat
 echo    Then open http://localhost:3763 in your browser
 echo    (Port 3763 = 'EPMD' on phone keypad - easy to remember!)
+echo.
+echo 2. Command line - EPUB conversion:
+echo    python epub_to_md_converter.py C:\path\to\epub\folder
+echo.
+echo 3. Command line - Web article conversion:
+echo    python html_to_md_converter.py https://example.com/article
+echo.
+echo 4. Command line - PDF conversion:
+echo    python pdf_to_md_converter.py C:\path\to\document.pdf
+echo    Use --accuracy-critical for financial/scientific docs
 echo.
 pause

@@ -1,11 +1,12 @@
 #!/bin/bash
-# EPUB & Web to Markdown Converter - Installer Script
+# EPUB, Web & PDF to Markdown Converter - Installer Script
 # Automatically installs all dependencies for the converter
 
 set -e  # Exit on error
 
 echo "=========================================="
-echo "EPUB & Web to Markdown Converter - Installer"
+echo "EPUB, Web & PDF to Markdown Converter"
+echo "            Installer v2.6.0"
 echo "=========================================="
 echo ""
 
@@ -205,10 +206,14 @@ setup_venv() {
         else
             print_error "Some dependencies failed to install"
             print_info "Trying to install core dependencies individually..."
+            # Core web/HTML dependencies
             "$VENV_DIR/bin/pip" install flask requests trafilatura beautifulsoup4 readability-lxml
             # Medium support dependencies (optional but recommended)
             print_info "Installing Medium article support (Selenium + undetected-chromedriver)..."
             "$VENV_DIR/bin/pip" install setuptools selenium webdriver-manager undetected-chromedriver
+            # PDF support dependencies
+            print_info "Installing PDF conversion support..."
+            "$VENV_DIR/bin/pip" install pymupdf pdfplumber Pillow
         fi
     else
         # Fallback if requirements.txt doesn't exist
@@ -216,11 +221,14 @@ setup_venv() {
         # Medium support dependencies
         print_info "Installing Medium article support..."
         "$VENV_DIR/bin/pip" install setuptools selenium webdriver-manager undetected-chromedriver
+        # PDF support dependencies
+        print_info "Installing PDF conversion support..."
+        "$VENV_DIR/bin/pip" install pymupdf pdfplumber Pillow
         if [ $? -eq 0 ]; then
             print_success "All dependencies installed successfully"
         else
             print_error "Failed to install some dependencies"
-            print_info "Core functionality will work, but Medium support may be limited"
+            print_info "Core functionality will work, but some features may be limited"
         fi
     fi
 }
@@ -233,6 +241,9 @@ make_executable() {
     chmod +x epub_to_md_converter.py
     if [ -f "html_to_md_converter.py" ]; then
         chmod +x html_to_md_converter.py
+    fi
+    if [ -f "pdf_to_md_converter.py" ]; then
+        chmod +x pdf_to_md_converter.py
     fi
     if [ -f "gui.py" ]; then
         chmod +x gui.py
@@ -330,6 +341,10 @@ main() {
     echo ""
     echo "3. Command line - Web article conversion:"
     echo "   python3 html_to_md_converter.py https://example.com/article"
+    echo ""
+    echo "4. Command line - PDF conversion:"
+    echo "   python3 pdf_to_md_converter.py /path/to/document.pdf"
+    echo "   Use --accuracy-critical for financial/scientific docs"
     echo ""
 }
 
