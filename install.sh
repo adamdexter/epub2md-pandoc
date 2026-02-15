@@ -6,7 +6,7 @@ set -e  # Exit on error
 
 echo "=========================================="
 echo "EPUB, Web & PDF to Markdown Converter"
-echo "            Installer v2.6.1"
+echo "            Installer v2.7.0"
 echo "=========================================="
 echo ""
 

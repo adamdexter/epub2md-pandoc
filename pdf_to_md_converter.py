@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "2.0.1"
+CONVERTER_VERSION = "2.1.0"
 
 # ============================================================================
 # DEPENDENCY CHECKS
@@ -219,19 +219,196 @@ if not HTML_CONVERTER_AVAILABLE:
     clean_markdown_for_rag = _clean_markdown_fallback
 
     def extract_toc_from_markdown(content: str) -> List[Dict[str, Any]]:
-        """Fallback TOC extraction."""
+        """
+        Extract actual section headings for TOC, filtering out noise.
+        """
         toc = []
+
+        # Only match actual markdown headings (lines starting with #)
         heading_pattern = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
+
         for match in heading_pattern.finditer(content):
             level = len(match.group(1))
             text = match.group(2).strip()
-            if text and len(text) > 2:
-                toc.append({'text': text, 'level': level})
+
+            # FILTER OUT NON-HEADINGS:
+            # Skip if it's just a number (page number)
+            if re.match(r'^\d+$', text):
+                continue
+
+            # Skip if it looks like a table cell or data
+            if re.match(r'^[\d\.\-]+$', text):  # Just numbers/decimals
+                continue
+
+            # Skip if it's a journal header pattern
+            if 'Journal of' in text or 'et al.' in text:
+                continue
+
+            # Skip very short fragments (likely noise)
+            if len(text) < 5:
+                continue
+
+            # Skip if starts with common noise patterns
+            noise_starts = ['Note.', 'Note:', 'Table', 'Figure', 'ðN', 'Mean', 'SD',
+                            'BFI', 'TIPI', 'FIPI', 'NEO', 'Extraversion', 'Agreeableness',
+                            'Conscientiousness', 'Emotional', 'Openness']
+            if any(text.startswith(ns) for ns in noise_starts):
+                # Only skip if it's short (could be actual section about these topics)
+                if len(text) < 30:
+                    continue
+
+            # Skip author-like patterns (Name, Name, and Name)
+            if re.match(r'^[A-Z][a-z]+,?\s+[A-Z]', text) and '(' not in text:
+                if len(text.split()) <= 10:  # Short author-like text
+                    continue
+
+            toc.append({
+                'level': level,
+                'text': text
+            })
+
         return toc
 
     def remove_marketing_content(content: str) -> str:
         """Fallback - just return content as-is."""
         return content
+
+
+# ============================================================================
+# PDF CONTENT CLEANING FUNCTIONS
+# ============================================================================
+
+def is_academic_paper(first_page_text: str) -> bool:
+    """Detect if this is likely an academic paper."""
+    indicators = [
+        'Abstract',
+        'Introduction',
+        'University',
+        'Department',
+        'doi:',
+        'Journal of',
+        '@',  # Email
+        'received',  # Submission dates
+    ]
+
+    text_lower = first_page_text.lower()
+    matches = sum(1 for ind in indicators if ind.lower() in text_lower)
+    return matches >= 3
+
+
+def clean_academic_first_page(text: str) -> str:
+    """
+    Clean up academic paper first page.
+    Remove journal headers, footnotes, etc.
+    """
+    lines = text.split('\n')
+    cleaned = []
+    in_footnote = False
+
+    for line in lines:
+        # Skip journal masthead
+        if 'JOURNAL OF' in line.upper():
+            continue
+        if 'www.' in line.lower() or 'http' in line.lower():
+            continue
+
+        # Detect footnote start (usually starts with symbol or 'q')
+        if line.strip().startswith('q ') or line.strip().startswith('* '):
+            in_footnote = True
+
+        # Footnotes often end at empty line or new section
+        if in_footnote and (line.strip() == '' or line.strip().startswith('1.')):
+            in_footnote = False
+
+        if not in_footnote:
+            cleaned.append(line)
+
+    return '\n'.join(cleaned)
+
+
+def extract_metadata_from_content(first_page_text: str, pdf_metadata: dict) -> dict:
+    """
+    Extract metadata from PDF content when PDF metadata is missing/wrong.
+    """
+    metadata = {}
+
+    # Get title: Usually the first substantial line that's not a journal name
+    lines = first_page_text.strip().split('\n')
+    for line in lines[:20]:  # Check first 20 lines
+        line = line.strip()
+        # Skip empty, very short, or journal header lines
+        if len(line) < 10:
+            continue
+        if 'Journal of' in line or 'www.' in line or 'doi' in line.lower():
+            continue
+        if line.isupper() and len(line) < 30:  # Skip short all-caps (like "ABSTRACT")
+            continue
+        # Found potential title
+        if len(line) > 20 and not line.startswith('q '):  # Skip footnote markers
+            metadata['title'] = line
+            break
+
+    # Get authors: Look for pattern "Name, Name, and Name" or "Name*"
+    # Usually follows title, before "Department" or "Abstract"
+    author_area = '\n'.join(lines[:15])
+
+    # Pattern: Names with asterisks or institutional markers
+    author_pattern = re.search(
+        r'([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+(?:,?\s*(?:and\s+)?[A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)*)\*?',
+        author_area
+    )
+    if author_pattern:
+        authors = author_pattern.group(1)
+        # Clean up
+        authors = re.sub(r'\s+', ' ', authors)
+        metadata['author'] = authors
+
+    # Fallback to PDF metadata if content extraction failed
+    if 'title' not in metadata and pdf_metadata.get('title'):
+        # Only use if it doesn't look like a DOI
+        title = pdf_metadata.get('title', '')
+        if not title.startswith('doi') and not title.startswith('10.'):
+            metadata['title'] = title
+
+    if 'author' not in metadata and pdf_metadata.get('author'):
+        metadata['author'] = pdf_metadata.get('author')
+
+    return metadata
+
+
+def clean_pdf_artifacts(content: str) -> str:
+    """
+    Remove PDF artifacts like page numbers and running headers.
+    """
+    lines = content.split('\n')
+    cleaned_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip standalone page numbers
+        if re.match(r'^#*\s*\d{1,4}\s*$', stripped):
+            continue
+
+        # Skip running headers (Author et al. / Journal Name Year Pages)
+        if re.match(r'^#*\s*[A-Z]\.\s*[A-Z][a-z]+\s+et\s+al\.\s*/\s*Journal', stripped):
+            continue
+
+        # Skip lines that are just "Journal of X (Year) Pages"
+        if re.match(r'^#*\s*Journal\s+of\s+.+\d{4}.+\d+[–-]\d+\s*$', stripped):
+            continue
+
+        # Skip copyright lines
+        if 'Elsevier Science' in stripped or '0092-6566' in stripped:
+            continue
+
+        # Skip DOI lines if standalone
+        if re.match(r'^#*\s*doi:', stripped, re.I):
+            continue
+
+        cleaned_lines.append(line)
+
+    return '\n'.join(cleaned_lines)
 
 
 # ============================================================================
@@ -427,12 +604,17 @@ def convert_with_pymupdf(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dic
 
     doc = fitz.open(pdf_path)
     content_parts = []
+    first_page_text = ""
 
     for page_num in range(len(doc)):
         page = doc[page_num]
 
         # Get text with formatting hints
         text = page.get_text("text")
+
+        # Save first page text for metadata extraction
+        if page_num == 0:
+            first_page_text = text
 
         if text.strip():
             # Try to detect headers based on font size
@@ -444,15 +626,18 @@ def convert_with_pymupdf(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dic
         if page_num < len(doc) - 1:
             content_parts.append("\n---\n")
 
-    # Extract metadata
+    # Extract metadata from PDF
     pdf_metadata = doc.metadata or {}
     doc.close()
 
     markdown_content = "\n\n".join(content_parts)
 
+    # Extract metadata from content (better for academic papers)
+    content_metadata = extract_metadata_from_content(first_page_text, pdf_metadata)
+
     metadata = {
-        "title": pdf_metadata.get("title", ""),
-        "author": pdf_metadata.get("author", ""),
+        "title": content_metadata.get("title", pdf_metadata.get("title", "")),
+        "author": content_metadata.get("author", pdf_metadata.get("author", "")),
         "subject": pdf_metadata.get("subject", ""),
         "keywords": pdf_metadata.get("keywords", ""),
         "creation_date": pdf_metadata.get("creationDate", ""),
@@ -540,9 +725,10 @@ def convert_with_pdfplumber(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, 
 
     content_parts = []
     table_count = 0
+    first_page_text = ""
 
     with pdfplumber.open(pdf_path) as pdf:
-        metadata = pdf.metadata or {}
+        pdf_metadata = pdf.metadata or {}
 
         for page_num, page in enumerate(pdf.pages):
             # Extract tables first
@@ -558,6 +744,11 @@ def convert_with_pdfplumber(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, 
 
             # Extract text
             text = page.extract_text() or ""
+
+            # Save first page text for metadata extraction
+            if page_num == 0:
+                first_page_text = text
+
             if text.strip():
                 content_parts.append(text)
 
@@ -567,11 +758,14 @@ def convert_with_pdfplumber(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, 
 
     markdown_content = "\n\n".join(content_parts)
 
+    # Extract metadata from content (better for academic papers)
+    content_metadata = extract_metadata_from_content(first_page_text, pdf_metadata)
+
     result_metadata = {
-        "title": metadata.get("Title", ""),
-        "author": metadata.get("Author", ""),
-        "subject": metadata.get("Subject", ""),
-        "creation_date": metadata.get("CreationDate", ""),
+        "title": content_metadata.get("title", pdf_metadata.get("Title", "")),
+        "author": content_metadata.get("author", pdf_metadata.get("Author", "")),
+        "subject": pdf_metadata.get("Subject", ""),
+        "creation_date": pdf_metadata.get("CreationDate", ""),
         "extraction_tool": "pdfplumber",
         "tables_extracted": table_count
     }
@@ -1073,6 +1267,7 @@ def convert_pdf_to_markdown(
 
         # Step 4: Clean content for RAG
         print("\n[4/6] Cleaning content for RAG...", flush=True)
+        markdown_content = clean_pdf_artifacts(markdown_content)  # Remove page numbers, headers
         markdown_content = clean_markdown_for_rag(markdown_content)
         print(f"      Cleaned content: {len(markdown_content):,} characters", flush=True)
 
@@ -1100,15 +1295,28 @@ def convert_pdf_to_markdown(
             ocr_applied=ocr_applied
         )
 
-        # Build TOC if available
+        # Build TOC if available and meaningful
         toc_markdown = ""
         if len(toc) >= 3:
-            toc_markdown = "\n## Table of Contents\n\n"
-            min_level = min(item['level'] for item in toc)
-            for item in toc:
-                indent = "  " * (item['level'] - min_level)
-                toc_markdown += f"{indent}- {item['text']}\n"
-            toc_markdown += "\n"
+            # Filter to only include numbered sections or clear section names
+            common_sections = ['Abstract', 'Introduction', 'Method', 'Methods',
+                               'Results', 'Discussion', 'Conclusion', 'Conclusions',
+                               'References', 'Appendix', 'Acknowledgments', 'Background',
+                               'Literature Review', 'Methodology', 'Analysis', 'Summary']
+            meaningful_toc = [
+                item for item in toc
+                if re.match(r'^\d+\.?\s+\w', item['text']) or  # Numbered sections
+                   item['text'] in common_sections or  # Common section names
+                   (len(item['text']) > 10 and item['level'] <= 2)  # Level 1-2 headings with substance
+            ]
+
+            if len(meaningful_toc) >= 3:
+                toc_markdown = "\n## Table of Contents\n\n"
+                min_level = min(item['level'] for item in meaningful_toc)
+                for item in meaningful_toc:
+                    indent = "  " * (item['level'] - min_level)
+                    toc_markdown += f"{indent}- {item['text']}\n"
+                toc_markdown += "\n"
 
         # Combine all parts
         final_content = frontmatter + "\n\n" + toc_markdown + markdown_content
