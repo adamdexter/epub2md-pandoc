@@ -283,68 +283,68 @@ def analyze_pdf(pdf_path: str) -> PDFAnalysis:
             text = page.get_text()
             total_chars += len(text)
 
-        # Count fonts on sample pages
-        if page_num in sample_pages:
-            text_dict = page.get_text("dict")
-            for block in text_dict.get("blocks", []):
-                if block.get("type") == 0:  # Text block
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            fonts.add(span.get("font", ""))
+            # Count fonts on sample pages
+            if page_num in sample_pages:
+                text_dict = page.get_text("dict")
+                for block in text_dict.get("blocks", []):
+                    if block.get("type") == 0:  # Text block
+                        for line in block.get("lines", []):
+                            for span in line.get("spans", []):
+                                fonts.add(span.get("font", ""))
 
-        # Detect potential tables (heuristic: many horizontal/vertical lines)
-        drawings = page.get_drawings()
-        h_lines = 0
-        v_lines = 0
-        for drawing in drawings:
-            for item in drawing.get("items", []):
-                if item[0] == "l":  # Line
-                    x0, y0, x1, y1 = item[1:5]
-                    if abs(y0 - y1) < 2:  # Horizontal
-                        h_lines += 1
-                    elif abs(x0 - x1) < 2:  # Vertical
-                        v_lines += 1
+            # Detect potential tables (heuristic: many horizontal/vertical lines)
+            drawings = page.get_drawings()
+            h_lines = 0
+            v_lines = 0
+            for drawing in drawings:
+                for item in drawing.get("items", []):
+                    if item[0] == "l":  # Line
+                        x0, y0, x1, y1 = item[1:5]
+                        if abs(y0 - y1) < 2:  # Horizontal
+                            h_lines += 1
+                        elif abs(x0 - x1) < 2:  # Vertical
+                            v_lines += 1
 
-        if h_lines > 5 and v_lines > 5:
-            total_tables += 1
+            if h_lines > 5 and v_lines > 5:
+                total_tables += 1
 
-        # Detect figures/images
-        images = page.get_images()
-        for img_index, img in enumerate(images):
-            xref = img[0]
-            # Get image rect
-            for img_rect in page.get_image_rects(xref):
-                # Large images are likely figures
-                width = img_rect.width
-                height = img_rect.height
-                if width > 100 and height > 100:
-                    total_figures += 1
-                    figures_info.append(FigureInfo(
-                        page=page_num,
-                        bbox=[img_rect.x0, img_rect.y0, img_rect.x1, img_rect.y1],
-                        fig_type="image",
-                        has_text=False,
-                        confidence=0.7
-                    ))
+            # Detect figures/images
+            images = page.get_images()
+            for img_index, img in enumerate(images):
+                xref = img[0]
+                # Get image rect
+                for img_rect in page.get_image_rects(xref):
+                    # Large images are likely figures
+                    width = img_rect.width
+                    height = img_rect.height
+                    if width > 100 and height > 100:
+                        total_figures += 1
+                        figures_info.append(FigureInfo(
+                            page=page_num,
+                            bbox=[img_rect.x0, img_rect.y0, img_rect.x1, img_rect.y1],
+                            fig_type="image",
+                            has_text=False,
+                            confidence=0.7
+                        ))
 
-        # Detect multi-column layout (text blocks at similar y with different x)
-        if page_num in sample_pages:
-            text_dict = page.get_text("dict")
-            blocks = text_dict.get("blocks", [])
-            text_blocks = [b for b in blocks if b.get("type") == 0]
-            if len(text_blocks) > 2:
-                # Check if blocks have overlapping y ranges but different x
-                for i, b1 in enumerate(text_blocks):
-                    for b2 in text_blocks[i+1:]:
-                        y_overlap = (b1["bbox"][1] < b2["bbox"][3] and b2["bbox"][1] < b1["bbox"][3])
-                        x_separate = (b1["bbox"][2] < b2["bbox"][0] - 50) or (b2["bbox"][2] < b1["bbox"][0] - 50)
-                        if y_overlap and x_separate:
-                            multi_column_pages += 1
-                            break
+            # Detect multi-column layout (text blocks at similar y with different x)
+            if page_num in sample_pages:
+                text_dict = page.get_text("dict")
+                blocks = text_dict.get("blocks", [])
+                text_blocks = [b for b in blocks if b.get("type") == 0]
+                if len(text_blocks) > 2:
+                    # Check if blocks have overlapping y ranges but different x
+                    for i, b1 in enumerate(text_blocks):
+                        for b2 in text_blocks[i+1:]:
+                            y_overlap = (b1["bbox"][1] < b2["bbox"][3] and b2["bbox"][1] < b1["bbox"][3])
+                            x_separate = (b1["bbox"][2] < b2["bbox"][0] - 50) or (b2["bbox"][2] < b1["bbox"][0] - 50)
+                            if y_overlap and x_separate:
+                                multi_column_pages += 1
+                                break
 
-        # Show progress for large PDFs
-        if page_count > 20 and (page_num + 1) % 10 == 0:
-            print(f"      Analyzed {page_num + 1}/{page_count} pages...", flush=True)
+            # Show progress for large PDFs
+            if page_count > 20 and (page_num + 1) % 10 == 0:
+                print(f"      Analyzed {page_num + 1}/{page_count} pages...", flush=True)
 
         except Exception as e:
             # Skip problematic pages but continue analysis
