@@ -4,7 +4,7 @@ REM Automatically installs all dependencies for the converter
 
 echo ==========================================
 echo EPUB, Web ^& PDF to Markdown Converter
-echo           Installer v2.6.0
+echo           Installer v2.6.1
 echo ==========================================
 echo.
 

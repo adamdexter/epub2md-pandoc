@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 # Script version for tracking conversions
-CONVERTER_VERSION = "2.0.0"
+CONVERTER_VERSION = "2.0.1"
 
 # ============================================================================
 # DEPENDENCY CHECKS
@@ -248,9 +248,14 @@ def analyze_pdf(pdf_path: str) -> PDFAnalysis:
     if not PYMUPDF_AVAILABLE:
         raise RuntimeError("PyMuPDF (fitz) is required for PDF analysis. Install with: pip install pymupdf")
 
-    print(f"      Analyzing PDF structure...")
+    print(f"      Opening PDF...", flush=True)
 
-    doc = fitz.open(pdf_path)
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to open PDF: {e}")
+
+    print(f"      PDF opened successfully. Analyzing {len(doc)} pages...", flush=True)
     page_count = len(doc)
 
     total_chars = 0
@@ -271,11 +276,12 @@ def analyze_pdf(pdf_path: str) -> PDFAnalysis:
     sample_pages = [p for p in sample_pages if p < page_count]
 
     for page_num in range(page_count):
-        page = doc[page_num]
+        try:
+            page = doc[page_num]
 
-        # Get text
-        text = page.get_text()
-        total_chars += len(text)
+            # Get text
+            text = page.get_text()
+            total_chars += len(text)
 
         # Count fonts on sample pages
         if page_num in sample_pages:
@@ -336,6 +342,15 @@ def analyze_pdf(pdf_path: str) -> PDFAnalysis:
                             multi_column_pages += 1
                             break
 
+        # Show progress for large PDFs
+        if page_count > 20 and (page_num + 1) % 10 == 0:
+            print(f"      Analyzed {page_num + 1}/{page_count} pages...", flush=True)
+
+        except Exception as e:
+            # Skip problematic pages but continue analysis
+            print(f"      Warning: Could not analyze page {page_num + 1}: {e}", flush=True)
+            continue
+
     # Extract metadata
     metadata = doc.metadata or {}
     doc.close()
@@ -373,8 +388,8 @@ def analyze_pdf(pdf_path: str) -> PDFAnalysis:
     if recommended_tool == ExtractionTool.PDFPLUMBER and not PDFPLUMBER_AVAILABLE:
         recommended_tool = ExtractionTool.PYMUPDF
 
-    print(f"      Pages: {page_count}, Chars: {total_chars:,}, Tables: {total_tables}, Figures: {total_figures}")
-    print(f"      Document type: {doc_type.value}, Recommended tool: {recommended_tool.value}")
+    print(f"      Pages: {page_count}, Chars: {total_chars:,}, Tables: {total_tables}, Figures: {total_figures}", flush=True)
+    print(f"      Document type: {doc_type.value}, Recommended tool: {recommended_tool.value}", flush=True)
 
     return PDFAnalysis(
         has_text_layer=has_text_layer,
@@ -408,7 +423,7 @@ def convert_with_pymupdf(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dic
     if not PYMUPDF_AVAILABLE:
         raise RuntimeError("PyMuPDF not available")
 
-    print("      Using PyMuPDF for conversion...")
+    print("      Using PyMuPDF for conversion...", flush=True)
 
     doc = fitz.open(pdf_path)
     content_parts = []
@@ -521,7 +536,7 @@ def convert_with_pdfplumber(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, 
     if not PDFPLUMBER_AVAILABLE:
         raise RuntimeError("pdfplumber not available")
 
-    print("      Using pdfplumber for conversion...")
+    print("      Using pdfplumber for conversion...", flush=True)
 
     content_parts = []
     table_count = 0
@@ -617,7 +632,7 @@ def convert_with_marker(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dict
     if not MARKER_AVAILABLE:
         raise RuntimeError("Marker not available. Install with: pip install marker-pdf")
 
-    print("      Using Marker for conversion (this may take a while)...")
+    print("      Using Marker for conversion (this may take a while)...", flush=True)
 
     # Load models (cached after first load)
     models = load_all_models()
@@ -659,7 +674,7 @@ def convert_with_ocr(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dict[st
     if not PIL_AVAILABLE:
         raise RuntimeError("PIL/Pillow required for OCR preprocessing")
 
-    print("      Running OCR on scanned document...")
+    print("      Running OCR on scanned document...", flush=True)
 
     doc = fitz.open(pdf_path)
     content_parts = []
@@ -683,7 +698,7 @@ def convert_with_ocr(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dict[st
 
         # Progress
         if (page_num + 1) % 10 == 0:
-            print(f"      OCR progress: {page_num + 1}/{len(doc)} pages")
+            print(f"      OCR progress: {page_num + 1}/{len(doc)} pages", flush=True)
 
     pdf_metadata = doc.metadata or {}
     doc.close()
@@ -971,9 +986,9 @@ def convert_pdf_to_markdown(
     if not pdf_path.lower().endswith('.pdf'):
         return False, f"File is not a PDF: {pdf_path}", None
 
-    print(f"\n{'='*60}")
-    print(f"Converting PDF: {Path(pdf_path).name}")
-    print('='*60)
+    print(f"\n{'='*60}", flush=True)
+    print(f"Converting PDF: {Path(pdf_path).name}", flush=True)
+    print('='*60, flush=True)
 
     # Create output directory
     output_path = Path(output_dir)
@@ -981,11 +996,11 @@ def convert_pdf_to_markdown(
 
     try:
         # Step 1: Analyze PDF
-        print("\n[1/6] Analyzing PDF structure...")
+        print("\n[1/6] Analyzing PDF structure...", flush=True)
         analysis = analyze_pdf(pdf_path)
 
         # Step 2: Select and run conversion tool
-        print(f"\n[2/6] Converting with {analysis.recommended_tool.value}...")
+        print(f"\n[2/6] Converting with {analysis.recommended_tool.value}...", flush=True)
 
         quality_threshold = 0.93 if accuracy_critical else 0.85
         tools_tried = []
@@ -1015,11 +1030,11 @@ def convert_pdf_to_markdown(
 
                 # Score the result
                 score = score_conversion(analysis, markdown_content)
-                print(f"      Conversion score: {score.overall_score:.2f}")
+                print(f"      Conversion score: {score.overall_score:.2f}", flush=True)
 
                 if score.issues:
                     for issue in score.issues:
-                        print(f"      Warning: {issue}")
+                        print(f"      Warning: {issue}", flush=True)
 
                 if best_result is None or score.overall_score > best_score.overall_score:
                     best_result = (markdown_content, metadata)
@@ -1027,13 +1042,13 @@ def convert_pdf_to_markdown(
 
                 # Check if quality is acceptable
                 if score.overall_score >= quality_threshold:
-                    print(f"      Score meets threshold ({quality_threshold:.2f})")
+                    print(f"      Score meets threshold ({quality_threshold:.2f})", flush=True)
                     break
                 else:
-                    print(f"      Score below threshold ({quality_threshold:.2f}), trying next tool...")
+                    print(f"      Score below threshold ({quality_threshold:.2f}), trying next tool...", flush=True)
 
             except Exception as e:
-                print(f"      {tool.value} failed: {e}")
+                print(f"      {tool.value} failed: {e}", flush=True)
                 continue
 
         if best_result is None:
@@ -1042,7 +1057,7 @@ def convert_pdf_to_markdown(
         markdown_content, metadata = best_result
 
         # Step 3: Extract figures as text
-        print("\n[3/6] Processing figures...")
+        print("\n[3/6] Processing figures...", flush=True)
         if analysis.figures:
             figure_blocks = []
             for fig_info in analysis.figures[:20]:  # Limit to first 20 figures
@@ -1052,24 +1067,24 @@ def convert_pdf_to_markdown(
             if figure_blocks:
                 markdown_content += "\n\n## Figures\n\n" + "\n\n".join(figure_blocks)
 
-            print(f"      Processed {len(figure_blocks)} figures")
+            print(f"      Processed {len(figure_blocks)} figures", flush=True)
         else:
-            print("      No figures to process")
+            print("      No figures to process", flush=True)
 
         # Step 4: Clean content for RAG
-        print("\n[4/6] Cleaning content for RAG...")
+        print("\n[4/6] Cleaning content for RAG...", flush=True)
         markdown_content = clean_markdown_for_rag(markdown_content)
-        print(f"      Cleaned content: {len(markdown_content):,} characters")
+        print(f"      Cleaned content: {len(markdown_content):,} characters", flush=True)
 
         # Step 5: Calculate reading time and TOC
-        print("\n[5/6] Generating metadata...")
+        print("\n[5/6] Generating metadata...", flush=True)
         reading_time = calculate_reading_time(markdown_content)
         toc = extract_toc_from_markdown(markdown_content)
-        print(f"      Reading time: {reading_time} minutes")
-        print(f"      TOC sections: {len(toc)}")
+        print(f"      Reading time: {reading_time} minutes", flush=True)
+        print(f"      TOC sections: {len(toc)}", flush=True)
 
         # Step 6: Generate output
-        print("\n[6/6] Generating output file...")
+        print("\n[6/6] Generating output file...", flush=True)
 
         # Determine OCR status
         ocr_applied = analysis.document_type == DocumentType.SCANNED
@@ -1110,12 +1125,12 @@ def convert_pdf_to_markdown(
 
         file_size = filepath.stat().st_size / 1024
 
-        print(f"\n{'='*60}")
-        print(f"SUCCESS!")
-        print(f"Output: {filepath}")
-        print(f"Size: {file_size:.1f} KB")
-        print(f"Quality Score: {best_score.overall_score:.2f}")
-        print('='*60)
+        print(f"\n{'='*60}", flush=True)
+        print(f"SUCCESS!", flush=True)
+        print(f"Output: {filepath}", flush=True)
+        print(f"Size: {file_size:.1f} KB", flush=True)
+        print(f"Quality Score: {best_score.overall_score:.2f}", flush=True)
+        print('='*60, flush=True)
 
         return True, f"Successfully converted to: {filename}", str(filepath)
 
