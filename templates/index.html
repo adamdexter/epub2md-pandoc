@@ -83,7 +83,8 @@
             flex: 1;
         }
 
-        input[type="text"] {
+        input[type="text"],
+        input[type="url"] {
             width: 100%;
             padding: 12px 15px;
             border: 2px solid #e0e0e0;
@@ -92,7 +93,8 @@
             transition: border-color 0.3s;
         }
 
-        input[type="text"]:focus {
+        input[type="text"]:focus,
+        input[type="url"]:focus {
             outline: none;
             border-color: #667eea;
         }
@@ -400,6 +402,36 @@
             margin-left: 10px;
         }
 
+        .picker-link-row {
+            text-align: center;
+            color: #6c757d;
+            font-size: 0.95em;
+            margin-top: -10px;
+            margin-bottom: 25px;
+        }
+
+        .picker-link {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+            margin: 0 4px;
+        }
+
+        .picker-link:hover {
+            text-decoration: underline;
+        }
+
+        .picker-sep {
+            color: #ccc;
+            margin: 0 4px;
+        }
+
+        .dropped-file-meta {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 2px;
+        }
+
         /* Tab Navigation */
         .tabs {
             display: flex;
@@ -519,7 +551,7 @@
         <div class="header">
             <h1>📚 EPUB, Web & PDF to Markdown Converter</h1>
             <p>Convert EPUB books, web articles, and PDF documents to AI-optimized Markdown files</p>
-            <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px;">Version 2.7.0 - Academic PDF Improvements</p>
+            <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px;">Version {{ version }}</p>
         </div>
 
         <div class="content">
@@ -546,21 +578,19 @@
                 <!-- Drag and Drop Zone -->
                 <div id="drop-zone" class="drop-zone">
                     <div class="drop-zone-icon">📚</div>
-                    <div class="drop-zone-text">Drag & Drop EPUB files here</div>
-                    <div class="drop-zone-subtext">Files will be copied to your input folder for conversion</div>
+                    <div class="drop-zone-text">Drag &amp; drop EPUB files or folders here</div>
+                    <div class="drop-zone-subtext">Multiple files, individual files, or whole folders all work</div>
                     <div id="dropped-files" class="dropped-files"></div>
                 </div>
 
-                <form id="converter-form">
-                <div class="form-group">
-                    <label for="input-folder">Input Folder (containing EPUB files)</label>
-                    <div class="folder-input-group">
-                        <input type="text" id="input-folder" placeholder="e.g., /home/user/Books/epub" required>
-                        <button type="button" class="btn btn-secondary" onclick="browseFolder('input')">Browse</button>
-                    </div>
-                    <div class="help-text">Select the folder containing your EPUB files</div>
+                <div class="picker-link-row">
+                    Or manually select via system window:
+                    <a href="#" class="picker-link" onclick="pickEpubFiles(event)">Choose Files</a>
+                    <span class="picker-sep">|</span>
+                    <a href="#" class="picker-link" onclick="pickEpubFolder(event)">Choose Folder</a>
                 </div>
 
+                <form id="converter-form">
                 <div class="form-group">
                     <label for="output-folder">Output Folder (for Markdown files)</label>
                     <div class="folder-input-group">
@@ -570,7 +600,7 @@
                     <div class="help-text">Choose where to save the converted Markdown files</div>
                 </div>
 
-                <button type="submit" class="btn btn-primary" id="convert-btn">
+                <button type="submit" class="btn btn-primary" id="convert-btn" disabled>
                     Convert EPUBs to Markdown
                 </button>
             </form>
@@ -838,9 +868,6 @@
                 const response = await fetch('/get_preferences');
                 const prefs = await response.json();
 
-                // Set input folder (to saved value or Downloads folder)
-                document.getElementById('input-folder').value = prefs.input_folder || '';
-
                 // Set output folder (to saved value or Downloads folder)
                 document.getElementById('output-folder').value = prefs.output_folder || 'md processed books';
 
@@ -861,7 +888,6 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        input_folder: document.getElementById('input-folder').value,
                         output_folder: document.getElementById('output-folder').value,
                         url_output_folder: document.getElementById('url-output-folder').value,
                         pdf_output_folder: document.getElementById('pdf-output-folder').value
@@ -876,11 +902,10 @@
         document.getElementById('converter-form').addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            const inputFolder = document.getElementById('input-folder').value;
             const outputFolder = document.getElementById('output-folder').value;
 
-            if (!inputFolder) {
-                alert('Please select an input folder');
+            if (inputItems.length === 0) {
+                alert('Please add at least one EPUB file or folder.');
                 return;
             }
 
@@ -893,14 +918,19 @@
             document.getElementById('progress-log').innerHTML = '<p>Starting conversion...</p>';
 
             try {
-                // Start conversion
+                // Build payload from inputItems (strip UI-only fields)
+                const payloadItems = inputItems.map(item => {
+                    const out = { kind: item.kind };
+                    if (item.path) out.path = item.path;
+                    if (item.upload_paths) out.upload_paths = item.upload_paths;
+                    return out;
+                });
+
                 const response = await fetch('/convert', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        input_folder: inputFolder,
+                        items: payloadItems,
                         output_folder: outputFolder
                     })
                 });
@@ -913,10 +943,8 @@
                     return;
                 }
 
-                // Save preferences for next time
                 savePreferences();
 
-                // Poll for status updates
                 pollStatus();
 
             } catch (error) {
@@ -946,8 +974,8 @@
                 if (data.completed) {
                     document.getElementById('status-badge').className = 'status-badge status-complete';
                     document.getElementById('status-badge').innerHTML = '✓ Complete';
-                    document.getElementById('convert-btn').disabled = false;
                     document.getElementById('convert-btn').innerHTML = 'Convert EPUBs to Markdown';
+                    document.getElementById('convert-btn').disabled = inputItems.length === 0;
                 } else if (data.running) {
                     // Continue polling
                     setTimeout(pollStatus, 500);
@@ -1083,8 +1111,12 @@
             savePreferences();
         }
 
-        // ========== Drag and Drop Support ==========
-        let droppedFiles = [];
+        // ========== EPUB Input: Drag/Drop + Native Pickers ==========
+        // inputItems: list of {kind, label, path?, upload_paths?}
+        //   - kind: 'file' or 'folder'
+        //   - path: absolute path on user's system (from native picker)
+        //   - upload_paths: array of staged paths on server (from drag-drop)
+        let inputItems = [];
 
         const dropZone = document.getElementById('drop-zone');
         const droppedFilesContainer = document.getElementById('dropped-files');
@@ -1112,82 +1144,224 @@
             }, false);
         });
 
-        // Handle dropped files
         dropZone.addEventListener('drop', handleDrop, false);
 
         async function handleDrop(e) {
             const dt = e.dataTransfer;
-            const files = [...dt.files];
+            const dtItems = dt.items ? [...dt.items] : [];
+            const fallbackFiles = dt.files ? [...dt.files] : [];
 
-            // Filter only .epub files
-            const epubFiles = files.filter(file => file.name.toLowerCase().endsWith('.epub'));
-
-            if (epubFiles.length === 0) {
-                alert('Please drop EPUB files only (.epub extension)');
-                return;
+            // Prefer the items API so we can detect folders via webkitGetAsEntry.
+            const entries = [];
+            for (const it of dtItems) {
+                if (it.kind === 'file') {
+                    const entry = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
+                    if (entry) {
+                        entries.push(entry);
+                    } else {
+                        const f = it.getAsFile();
+                        if (f) entries.push({ isFile: true, isDirectory: false, _file: f, name: f.name });
+                    }
+                }
             }
 
-            // Upload files to input folder
-            const inputFolder = document.getElementById('input-folder').value;
-            if (!inputFolder) {
-                alert('Please select an input folder first');
-                return;
+            // Fallback for browsers that don't support webkitGetAsEntry.
+            if (entries.length === 0 && fallbackFiles.length > 0) {
+                for (const f of fallbackFiles) {
+                    entries.push({ isFile: true, isDirectory: false, _file: f, name: f.name });
+                }
             }
 
-            for (const file of epubFiles) {
-                await uploadFile(file, inputFolder);
+            for (const entry of entries) {
+                if (entry.isDirectory) {
+                    await processDroppedDirectory(entry);
+                } else if (entry.isFile) {
+                    const file = entry._file ? entry._file : await readEntryFile(entry);
+                    if (file && file.name.toLowerCase().endsWith('.epub')) {
+                        await addDroppedEpubFile(file);
+                    } else if (file) {
+                        // Silently skip non-epub files, but log
+                        console.log('Skipping non-EPUB file:', file.name);
+                    }
+                }
             }
 
-            updateDroppedFilesDisplay();
+            updateInputItemsDisplay();
         }
 
-        async function uploadFile(file, targetFolder) {
+        function readEntryFile(entry) {
+            return new Promise(resolve => entry.file(resolve, () => resolve(null)));
+        }
+
+        async function processDroppedDirectory(dirEntry) {
+            // Read top-level entries only — matches native folder-pick behavior.
+            const reader = dirEntry.createReader();
+            const allEntries = [];
+            // readEntries can return in batches; loop until empty.
+            await new Promise(resolve => {
+                const readBatch = () => {
+                    reader.readEntries(batch => {
+                        if (batch.length === 0) {
+                            resolve();
+                        } else {
+                            allEntries.push(...batch);
+                            readBatch();
+                        }
+                    }, () => resolve());
+                };
+                readBatch();
+            });
+
+            const stagedPaths = [];
+            const fileNames = [];
+            for (const child of allEntries) {
+                if (child.isFile && child.name.toLowerCase().endsWith('.epub')) {
+                    const file = await readEntryFile(child);
+                    if (!file) continue;
+                    const staged = await uploadEpubToStaging(file);
+                    if (staged) {
+                        stagedPaths.push(staged);
+                        fileNames.push(file.name);
+                    }
+                }
+            }
+
+            if (stagedPaths.length === 0) {
+                alert(`Folder "${dirEntry.name}" contained no EPUB files at the top level.`);
+                return;
+            }
+
+            inputItems.push({
+                kind: 'folder',
+                label: dirEntry.name,
+                upload_paths: stagedPaths,
+                file_count: stagedPaths.length
+            });
+        }
+
+        async function addDroppedEpubFile(file) {
+            const staged = await uploadEpubToStaging(file);
+            if (!staged) return;
+            inputItems.push({
+                kind: 'file',
+                label: file.name,
+                upload_paths: [staged]
+            });
+        }
+
+        async function uploadEpubToStaging(file) {
             const formData = new FormData();
             formData.append('file', file);
-            formData.append('target_folder', targetFolder);
 
             try {
                 const response = await fetch('/upload_file', {
                     method: 'POST',
                     body: formData
                 });
-
                 const data = await response.json();
-
                 if (response.ok && data.success) {
-                    droppedFiles.push({
-                        name: file.name,
-                        path: data.path
-                    });
-                } else {
-                    alert('Error uploading ' + file.name + ': ' + (data.error || 'Unknown error'));
+                    return data.path;
                 }
+                alert('Error uploading ' + file.name + ': ' + (data.error || 'Unknown error'));
+                return null;
             } catch (error) {
                 alert('Error uploading ' + file.name + ': ' + error);
+                return null;
             }
         }
 
-        function updateDroppedFilesDisplay() {
+        // Native file picker
+        async function pickEpubFiles(e) {
+            if (e) e.preventDefault();
+            try {
+                const response = await fetch('/native_files_dialog', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        title: 'Select EPUB Files',
+                        extensions: ['.epub']
+                    })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    alert('File picker not available: ' + (data.error || 'Unknown error'));
+                    return;
+                }
+                if (data.selected && data.paths && data.paths.length > 0) {
+                    for (const p of data.paths) {
+                        const name = p.split('/').pop();
+                        inputItems.push({ kind: 'file', label: name, path: p });
+                    }
+                    updateInputItemsDisplay();
+                }
+            } catch (error) {
+                alert('Error opening file picker: ' + error);
+            }
+        }
+
+        // Native folder picker (re-uses existing folder dialog endpoint)
+        async function pickEpubFolder(e) {
+            if (e) e.preventDefault();
+            try {
+                const response = await fetch('/native_folder_dialog', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: 'Select Folder of EPUBs' })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    alert('Folder picker not available: ' + (data.error || 'Unknown error'));
+                    return;
+                }
+                if (data.selected && data.path) {
+                    const name = data.path.split('/').filter(Boolean).pop() || data.path;
+                    inputItems.push({ kind: 'folder', label: name, path: data.path });
+                    updateInputItemsDisplay();
+                }
+            } catch (error) {
+                alert('Error opening folder picker: ' + error);
+            }
+        }
+
+        function updateInputItemsDisplay() {
             droppedFilesContainer.innerHTML = '';
 
-            if (droppedFiles.length === 0) {
-                return;
-            }
-
-            droppedFiles.forEach((file, index) => {
+            inputItems.forEach((item, index) => {
                 const div = document.createElement('div');
                 div.className = 'dropped-file';
+                const icon = item.kind === 'folder' ? '📁' : '📖';
+                let meta = '';
+                if (item.kind === 'folder') {
+                    if (item.file_count !== undefined) {
+                        meta = `${item.file_count} file${item.file_count === 1 ? '' : 's'} (uploaded)`;
+                    } else if (item.path) {
+                        meta = item.path;
+                    }
+                } else if (item.path) {
+                    meta = item.path;
+                }
                 div.innerHTML = `
-                    <span class="dropped-file-name">📖 ${file.name}</span>
-                    <button class="remove-file" onclick="removeDroppedFile(${index})" title="Remove file">&times;</button>
+                    <div>
+                        <div class="dropped-file-name">${icon} ${escapeHtml(item.label)}</div>
+                        ${meta ? `<div class="dropped-file-meta">${escapeHtml(meta)}</div>` : ''}
+                    </div>
+                    <button class="remove-file" onclick="removeInputItem(${index})" title="Remove">&times;</button>
                 `;
                 droppedFilesContainer.appendChild(div);
             });
+
+            document.getElementById('convert-btn').disabled = inputItems.length === 0;
         }
 
-        function removeDroppedFile(index) {
-            droppedFiles.splice(index, 1);
-            updateDroppedFilesDisplay();
+        function removeInputItem(index) {
+            inputItems.splice(index, 1);
+            updateInputItemsDisplay();
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
         }
 
         // ========== Copy Logs Function ==========
@@ -1312,13 +1486,14 @@
                             <div class="success-message">
                                 <strong>✓ Success!</strong> Article converted successfully.
                                 <br><br>
-                                <strong>Output file:</strong> ${data.output_file}
+                                <strong>Output file:</strong>
+                                <code style="display:block; margin-top:5px; padding:8px 12px; background:#f0f0f0; border-radius:4px; word-break:break-all; cursor:pointer; user-select:all;" title="Click to select path">${escapeHtml(data.output_file || '')}</code>
                             </div>
                         `;
                     } else {
                         resultDiv.innerHTML = `
                             <div class="error-message">
-                                <strong>✗ Error:</strong> ${data.error || 'Conversion failed'}
+                                <strong>✗ Error:</strong> ${escapeHtml(data.error || 'Conversion failed')}
                             </div>
                         `;
                     }
@@ -1456,13 +1631,14 @@
                             <div class="success-message">
                                 <strong>✓ Success!</strong> PDF converted successfully.
                                 <br><br>
-                                <strong>Output file:</strong> ${data.output_file}
+                                <strong>Output file:</strong>
+                                <code style="display:block; margin-top:5px; padding:8px 12px; background:#f0f0f0; border-radius:4px; word-break:break-all; cursor:pointer; user-select:all;" title="Click to select path">${escapeHtml(data.output_file || '')}</code>
                             </div>
                         `;
                     } else {
                         resultDiv.innerHTML = `
                             <div class="error-message">
-                                <strong>✗ Error:</strong> ${data.error || 'Conversion failed'}
+                                <strong>✗ Error:</strong> ${escapeHtml(data.error || 'Conversion failed')}
                             </div>
                         `;
                     }
@@ -1585,7 +1761,7 @@
             const div = document.createElement('div');
             div.className = 'dropped-file';
             div.innerHTML = `
-                <span class="dropped-file-name">📄 ${pdfDroppedFile.name}</span>
+                <span class="dropped-file-name">📄 ${escapeHtml(pdfDroppedFile.name)}</span>
                 <button class="remove-file" onclick="removePdfDroppedFile()" title="Remove file">&times;</button>
             `;
             pdfDroppedFileContainer.appendChild(div);

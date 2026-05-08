@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check
+        run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Pandoc
+        run: sudo apt-get update && sudo apt-get install -y pandoc
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify version import
+        run: python -c "from version import __version__; print(f'Version: {__version__}')"
+
+      - name: Verify EPUB converter imports
+        run: python -c "from epub_to_md_converter import process_folder, check_pandoc_installed; print('EPUB converter OK')"
+
+      - name: Verify HTML converter imports
+        run: python -c "from html_to_md_converter import convert_url_to_markdown; print('HTML converter OK')"
+
+      - name: Verify PDF converter imports
+        run: python -c "from pdf_to_md_converter import convert_pdf_to_markdown; print('PDF converter OK')"
+
+      - name: Verify GUI imports
+        run: python -c "from gui import app; print('GUI OK')"
+
+      - name: Check Pandoc is available
+        run: python -c "from epub_to_md_converter import check_pandoc_installed; assert check_pandoc_installed(), 'Pandoc not found'"
+
+      - name: Test CLI help flags
+        run: |
+          python epub_to_md_converter.py --help 2>&1 || true
+          python html_to_md_converter.py --help
+          python pdf_to_md_converter.py --help
+
+      - name: Verify unified versioning
+        run: |
+          python -c "
+          from version import __version__
+          from epub_to_md_converter import CONVERTER_VERSION as ev
+          from html_to_md_converter import CONVERTER_VERSION as hv
+          from pdf_to_md_converter import CONVERTER_VERSION as pv
+          assert ev == hv == pv == __version__, f'Version mismatch: epub={ev}, html={hv}, pdf={pv}, version.py={__version__}'
+          print(f'All modules report version {__version__}')
+          "

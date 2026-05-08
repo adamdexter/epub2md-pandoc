@@ -18,8 +18,7 @@ from datetime import datetime
 from urllib.parse import urlparse, urljoin
 import html
 
-# Script version for tracking conversions
-CONVERTER_VERSION = "1.0.17"  # 1.0.17 refactors Medium support into separate module
+from version import __version__ as CONVERTER_VERSION
 
 # Try to import required libraries
 TRAFILATURA_AVAILABLE = False
@@ -130,9 +129,37 @@ def sanitize_html(html_content: str) -> str:
     return ''.join(cleaned)
 
 
+def _is_paywalled_site(url: str) -> bool:
+    """Check if URL is from a known paywalled news site."""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    paywalled_domains = [
+        'wsj.com', 'www.wsj.com',
+        'nytimes.com', 'www.nytimes.com',
+        'ft.com', 'www.ft.com',
+        'economist.com', 'www.economist.com',
+        'washingtonpost.com', 'www.washingtonpost.com',
+        'bloomberg.com', 'www.bloomberg.com',
+        'theathletic.com', 'www.theathletic.com',
+    ]
+    return any(host == d or host.endswith('.' + d) for d in paywalled_domains)
+
+
+def _is_gift_link(url: str) -> bool:
+    """Check if URL appears to be a gift/share link that bypasses paywall."""
+    parsed = urlparse(url)
+    params = parsed.query.lower()
+    # WSJ uses ?st=, NYT uses ?unlocked_article_code=, etc.
+    gift_params = ['st=', 'unlocked_article_code=', 'gift=', 'share=', 'token=']
+    return any(p in params for p in gift_params)
+
+
 def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]]:
     """
     Fetch URL content with proper headers.
+
+    Handles paywalled sites with session-based requests and
+    preserves gift link tokens through redirects.
 
     Returns:
         Tuple of (html_content, error_message)
@@ -140,13 +167,49 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
     if not REQUESTS_AVAILABLE:
         return None, "requests library not installed"
 
+    is_paywall = _is_paywalled_site(url)
+    is_gift = _is_gift_link(url)
+
+    if is_paywall:
+        if is_gift:
+            print(f"      Detected gift/share link from paywalled site", flush=True)
+        else:
+            print(f"      Warning: This appears to be a paywalled site. Content may be truncated.", flush=True)
+            print(f"      Tip: Use a gift/share link for full article access.", flush=True)
+
     try:
-        response = requests.get(
+        # Use a session to preserve cookies through redirects (important for gift links)
+        session = requests.Session()
+
+        # Enhanced headers for paywalled sites
+        headers = dict(DEFAULT_HEADERS)
+        if is_paywall:
+            parsed = urlparse(url)
+            headers['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
+            # Google referrer can help bypass some soft paywalls
+            if not is_gift:
+                headers['Referer'] = 'https://www.google.com/'
+
+        response = session.get(
             url,
-            headers=DEFAULT_HEADERS,
+            headers=headers,
             timeout=timeout,
             allow_redirects=True
         )
+
+        # For paywalled sites, a 401/403 with a gift link is likely a token issue
+        if response.status_code in (401, 403) and is_paywall:
+            if is_gift:
+                return None, (
+                    f"HTTP {response.status_code}: Gift link may have expired or been used. "
+                    "WSJ gift links are typically single-use. Request a new gift link from the sender."
+                )
+            else:
+                return None, (
+                    f"HTTP {response.status_code}: This article is behind a paywall. "
+                    "To convert paywalled articles, use a gift/share link instead."
+                )
+
         response.raise_for_status()
 
         # Try to detect encoding
@@ -155,12 +218,30 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
         # Sanitize HTML to remove control characters
         content = sanitize_html(response.text)
 
+        # Check if paywalled content was truncated
+        if is_paywall and content:
+            content_lower = content.lower()
+            truncation_signals = [
+                'subscribe to continue reading',
+                'to continue reading',
+                'sign in or create',
+                'this article is for subscribers',
+                'already a subscriber?',
+                'subscribe now',
+            ]
+            if any(sig in content_lower for sig in truncation_signals):
+                print(f"      Warning: Article appears to be truncated by paywall", flush=True)
+                if not is_gift:
+                    print(f"      Tip: Use a gift/share link for full content", flush=True)
+
         return content, None
 
     except requests.exceptions.Timeout:
         return None, f"Request timed out after {timeout} seconds"
     except requests.exceptions.HTTPError as e:
-        return None, f"HTTP error: {e.response.status_code} - {e.response.reason}"
+        status = e.response.status_code if e.response is not None else 'unknown'
+        reason = e.response.reason if e.response is not None else str(e)
+        return None, f"HTTP error: {status} - {reason}"
     except requests.exceptions.ConnectionError:
         return None, "Connection error - check your internet connection"
     except requests.exceptions.RequestException as e:
@@ -494,49 +575,67 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
                 metadata['title'] = h1.get_text(strip=True)
 
         # ===== AUTHOR: Look for author card patterns =====
-        # Medium-specific: Look for "Written by [Name]" pattern
-        # This is needed because Medium's article:author meta tag contains a URL, not the display name
-        if is_medium_url(url):
-            # Pattern A: Find image with alt text that looks like a person's name
-            # Medium uses author avatars with alt="Mikael Cho"
-            for img in soup.find_all('img', alt=True):
-                alt_text = img.get('alt', '').strip()
-                if alt_text and len(alt_text) > 4 and len(alt_text) < 40:
-                    # Check if alt text looks like a person name (First Last)
-                    if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', alt_text):
-                        # Verify it's not a generic alt like "Photo of..."
-                        if not re.match(r'^(Photo|Image|Avatar|Logo|Icon)', alt_text, re.I):
-                            metadata['author'] = alt_text
-                            break
+        # Medium-specific: article:author meta tag contains a URL, not the display name
+        # Helper to check if text looks like an author name (relaxed matching)
+        def _is_name_like(text):
+            """Check if text looks like a person's name (not a URL, number, or UI element)."""
+            if not text or len(text) < 2 or len(text) > 60:
+                return False
+            # Reject URLs, numbers, common UI text
+            if text.startswith('http') or text.startswith('@') or text.startswith('/'):
+                return False
+            if re.match(r'^[\d\s.]+$', text):
+                return False
+            reject_words = ['follow', 'subscribe', 'sign', 'read', 'write', 'member',
+                            'response', 'clap', 'share', 'more', 'about', 'help', 'open']
+            if text.lower().strip() in reject_words:
+                return False
+            # Must contain at least one letter
+            if not re.search(r'[a-zA-Z]', text):
+                return False
+            return True
 
-            # Pattern B: Find links to Medium user profiles and get their text
+        if is_medium_url(url):
+            # Pattern A (most reliable): Find links to Medium user profiles (/@username)
+            # The link text is the display name
+            for link in soup.find_all('a', href=True):
+                href = link.get('href', '')
+                if '/@' in href:
+                    text = link.get_text(strip=True)
+                    if _is_name_like(text) and len(text) > 1:
+                        # Skip if text is just the username from the URL
+                        username_match = re.search(r'@(\w+)', href)
+                        if username_match and text.lower() == username_match.group(1).lower():
+                            continue
+                        metadata['author'] = text
+                        break
+
+            # Pattern B: Find image with alt text near author section
             if 'author' not in metadata:
-                for link in soup.find_all('a', href=True):
-                    href = link.get('href', '')
-                    # Look for links to Medium user profiles (/@username or /u/...)
-                    if '/@' in href or '/u/' in href:
-                        text = link.get_text(strip=True)
-                        if text and len(text) > 4 and len(text) < 40:
-                            if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', text):
-                                metadata['author'] = text
+                for img in soup.find_all('img', alt=True):
+                    alt_text = img.get('alt', '').strip()
+                    if _is_name_like(alt_text):
+                        if not re.match(r'^(Photo|Image|Avatar|Logo|Icon|Cover)', alt_text, re.I):
+                            # Verify it's near an author-like context (profile link nearby)
+                            parent = img.find_parent(['div', 'a'])
+                            if parent and parent.find('a', href=re.compile(r'/@')):
+                                metadata['author'] = alt_text
                                 break
 
-            # Pattern C: Look near "followers" text - author section always has follower count
+            # Pattern C: Look near "followers" text
             if 'author' not in metadata:
-                followers_elem = soup.find(string=re.compile(r'\d+[KkMm]?\s*followers', re.I))
+                followers_elem = soup.find(string=re.compile(r'\d+[KkMm]?\s*[Ff]ollowers'))
                 if followers_elem:
-                    # Go up to find the container and look for name
                     container = followers_elem.find_parent(['div', 'section'])
                     if container:
                         for elem in container.find_all(['a', 'h2', 'h3', 'h4', 'span']):
                             text = elem.get_text(strip=True)
-                            if text and len(text) > 4 and len(text) < 40:
-                                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', text):
-                                    if 'followers' not in text.lower() and 'following' not in text.lower():
-                                        metadata['author'] = text
-                                        break
+                            if _is_name_like(text):
+                                if 'follower' not in text.lower() and 'following' not in text.lower():
+                                    metadata['author'] = text
+                                    break
 
-            # Pattern D: Find "Written by" text and look for nearby name
+            # Pattern D: "Written by" text
             if 'author' not in metadata:
                 written_by = soup.find(string=re.compile(r'Written by', re.I))
                 if written_by:
@@ -549,10 +648,9 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
                                 if '/tag/' in href or 'subscribe' in href.lower():
                                     continue
                                 text = link.get_text(strip=True)
-                                if text and len(text) > 4 and len(text) < 40:
-                                    if re.match(r'^[A-Z][a-z]+\s+[A-Z]', text):
-                                        metadata['author'] = text
-                                        break
+                                if _is_name_like(text):
+                                    metadata['author'] = text
+                                    break
 
         # Pattern 1: Image with "Photo" in alt + nearby name
         author_img = soup.find('img', alt=re.compile(r'Photo|Avatar|Author', re.I))
@@ -1913,27 +2011,37 @@ def convert_url_to_markdown(
         print("\n[4/6] Processing images...")
         all_images = extract_images(html_content, url)
 
-        # Filter to only images that are actually referenced in the article content
-        # This avoids downloading nav images, author avatars, related post images, etc.
+        # Filter out obvious non-article images (tiny icons, tracking pixels, avatars)
+        # but be inclusive — trafilatura strips image URLs from extracted text,
+        # so we can't rely on URL-in-content matching
         article_images = []
         for img in all_images:
             img_url = img['url']
-            # Check if this image URL (or a variant) appears in the content
-            # Handle various URL formats and partial matches
-            url_parts = urlparse(img_url)
-            img_filename = url_parts.path.split('/')[-1] if url_parts.path else ''
+            img_alt = (img.get('alt') or '').lower()
 
-            # Check for direct URL reference or filename reference in content
-            if (img_url in content or
-                (img_filename and img_filename in content) or
-                img.get('priority')):  # Always include og:image as it's the main article image
+            # Always include priority images (og:image)
+            if img.get('priority'):
                 article_images.append(img)
+                continue
 
-        print(f"      Found {len(all_images)} images on page, {len(article_images)} in article")
+            # Skip obvious non-content images
+            if any(skip in img_alt for skip in ['avatar', 'profile photo', 'logo', 'icon']):
+                continue
+
+            # Skip tiny tracking/spacer images by URL pattern
+            if any(p in img_url.lower() for p in ['1x1', 'pixel', 'tracking', 'beacon', 'stat.']):
+                continue
+
+            article_images.append(img)
+
+        print(f"      Found {len(all_images)} images on page, {len(article_images)} likely article images")
 
         if article_images:
-            image_dir = output_path / image_subdir
-            image_dir.mkdir(exist_ok=True)
+            # Create article-specific image subdirectory
+            article_slug = sanitize_filename(metadata.get('title', 'article')[:50])
+            article_image_dir = f"{image_subdir}/{article_slug}"
+            image_dir = output_path / article_image_dir
+            image_dir.mkdir(parents=True, exist_ok=True)
 
             # Create base name for images
             base_name = sanitize_filename(f"{metadata.get('author', 'Unknown')} - {metadata.get('title', 'Article')[:40]} - {metadata.get('source_name', 'Web')}")
@@ -1945,13 +2053,16 @@ def convert_url_to_markdown(
                     downloaded += 1
                     # Update content to reference local image
                     old_ref = img['url']
-                    new_ref = f"{image_subdir}/{local_name}"
+                    new_ref = f"{article_image_dir}/{local_name}"
                     alt_text = img['alt'] or img['title'] or f"Figure {idx}"
 
                     # Try to replace the image reference in content
-                    # This handles various markdown image formats
                     content = content.replace(f"]({old_ref})", f"]({new_ref})")
                     content = content.replace(f"src=\"{old_ref}\"", f"src=\"{new_ref}\"")
+
+                    # If image wasn't referenced in text, append it
+                    if old_ref not in content and new_ref not in content:
+                        content += f"\n\n![{alt_text}]({new_ref})\n"
 
             print(f"      Downloaded {downloaded}/{len(article_images)} article images")
     else:

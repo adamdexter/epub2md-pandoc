@@ -3,6 +3,7 @@
 **/.DS_Store
 **/._.DS_Store
 __pycache__/
+*.pyc
 .venv/
 run_gui.sh
 run_gui.bat
@@ -10,6 +11,23 @@ sample-epubs-for-testing/*.epub
 sample-epubs-for-testing/*.azw3
 test-output/
 
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.egg
+
 # Medium session data (contains auth cookies - never commit)
 .medium_cookies/
 .medium_chrome_profile/
+
+# Conversion output directories
+md processed books/
+converted_articles/
+converted_pdfs/
+
+# User preferences
+.epub2md_preferences.json
+
+# Per-session handoff notes (transient)
+HANDOFF.md

@@ -14,8 +14,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
 
-# Script version for tracking conversions
-CONVERTER_VERSION = "2.3.0"  # Update this when making changes
+from version import __version__ as CONVERTER_VERSION
 
 # EPUB Quality Pre-Check Configuration
 EPUB_QUALITY_THRESHOLD = 70.0  # Minimum quality score (0-100)
@@ -186,6 +185,77 @@ def check_pandoc_installed() -> bool:
         return False
 
 
+def build_toc_anchor_map(content: str) -> dict:
+    """
+    Parse TOC-style links in Pandoc EPUB output and build {anchor_id: heading_text}.
+
+    Many EPUBs ship with chapter titles only in a TOC of `[**Chapter X**...](#anchor)`
+    links and no real <h1>/<h2> tags in chapter bodies. Pandoc therefore emits
+    zero `#` headings. This builder lets us reconstruct headings from the TOC.
+    """
+    mapping = {}
+
+    # Inner alternation: a non-bracket char OR a single nested [..] pair.
+    # The branches don't overlap (the second consumes a balanced `[..]` and
+    # nothing else), which keeps backtracking linear on pathological input.
+    link_pattern = re.compile(
+        r'\[((?:[^\[\]]|\[[^\]]*\])+)\]\(#([^)\s]+)\)',
+        re.DOTALL
+    )
+
+    for m in link_pattern.finditer(content):
+        link_text = m.group(1)
+        anchor = m.group(2)
+
+        if anchor in mapping:
+            continue
+
+        title_m = re.search(r'\*{2,3}([^\*\n]+?)\*{2,3}', link_text)
+        if not title_m:
+            continue
+
+        title = title_m.group(1).strip(' *\\')
+        if not title or len(title) > 120:
+            continue
+
+        subtitle_m = re.search(r'\[([^\]\n]+?)\]\{\.\w+\}', link_text)
+        subtitle = subtitle_m.group(1).strip(' *\\') if subtitle_m else None
+
+        if subtitle and subtitle.lower() != title.lower() and len(subtitle) <= 120:
+            heading = f"{title}: {subtitle}"
+        else:
+            heading = title
+
+        mapping[anchor] = heading
+
+    return mapping
+
+
+def apply_toc_anchor_headings(content: str, anchor_map: dict) -> Tuple[str, int]:
+    """Insert `# heading` lines at each `[]{#anchor}` marker found in body."""
+    if not anchor_map:
+        return content, 0
+
+    conversions = 0
+
+    def replace(m):
+        nonlocal conversions
+        anchor = m.group(1)
+        if anchor in anchor_map:
+            conversions += 1
+            return f"# {anchor_map[anchor]}\n\n{m.group(0)}"
+        return m.group(0)
+
+    new_content = re.sub(
+        r'^\[\]\{#([^}\s]+)\}\s*$',
+        replace,
+        content,
+        flags=re.MULTILINE
+    )
+
+    return new_content, conversions
+
+
 def analyze_artifacts(content: str) -> dict:
     """
     Analyze markdown content for various artifact types.
@@ -193,8 +263,6 @@ def analyze_artifacts(content: str) -> dict:
     Returns:
         Dictionary with artifact counts and line count
     """
-    import re
-
     lines = content.split('\n')
     line_count = len(lines)
 
@@ -273,6 +341,14 @@ def assess_epub_quality(epub_path: str) -> dict:
         caps_lines = len([l for l in lines if l.strip() and len(l.strip()) > 10 and
                          l.strip().isupper() and not l.strip().startswith('#')])
 
+        # Check for TOC-anchored chapter pattern (Sway-style EPUBs):
+        # `[**Chapter X**...](#anchor)` links in TOC + `[]{#anchor}` markers in body
+        toc_anchor_map = build_toc_anchor_map(content)
+        anchor_markers = len(re.findall(r'^\[\]\{#[^}\s]+\}\s*$', content, re.MULTILINE))
+        toc_anchor_fixable = sum(
+            1 for a in toc_anchor_map if anchor_markers and a in content
+        )
+
         # Count artifacts
         header_attrs = len([l for l in lines if l.strip().startswith('#') and '{' in l])
         role_attrs = content.count('role=')
@@ -288,7 +364,8 @@ def assess_epub_quality(epub_path: str) -> dict:
             'caps_lines': caps_lines,
             'header_attrs': header_attrs,
             'role_attrs': role_attrs,
-            'bracket_classes': bracket_classes
+            'bracket_classes': bracket_classes,
+            'toc_anchor_fixable': toc_anchor_fixable
         }
 
         # Assess quality
@@ -301,6 +378,9 @@ def assess_epub_quality(epub_path: str) -> dict:
                 # This will be automatically fixed during conversion - lower penalty
                 issues.append(f"Fixable: {calibre_markers} Calibre-style markers detected (will auto-convert to headings)")
                 score -= 15.0  # Lower penalty - converter handles this automatically
+            elif toc_anchor_fixable >= 3:
+                issues.append(f"Fixable: {toc_anchor_fixable} TOC-anchored sections detected (will auto-convert to headings)")
+                score -= 15.0
             elif caps_lines > 30:
                 # ALL-CAPS pattern - not auto-fixable, but detectable
                 issues.append(f"WARNING: {caps_lines} ALL-CAPS lines - possible undetected headings (not auto-fixable)")
@@ -411,8 +491,6 @@ def apply_aggressive_cleanup(content: str, artifacts: dict, verbose: bool = Fals
     Returns:
         Cleaned content
     """
-    import re
-
     operations_run = []
 
     # Priority 1: Remove ALL header attributes (FIXED - handle Pandoc patterns)
@@ -599,8 +677,6 @@ def clean_markdown_for_claude(content: str, title: Optional[str] = None,
     - Metadata header
     - Clean formatting
     """
-    import re
-
     # Add metadata header
     metadata = []
     if title or author or year:
@@ -834,8 +910,6 @@ def convert_epub_to_md(epub_path: str, output_path: str,
         # Some EPUBs use [TEXT]{.calibreX} instead of markdown headings.
         # Convert these EARLY so they're counted as proper headings in scoring.
 
-        import re  # Import here for regex operations
-
         if '{.calibre' in original_content:
             lines = original_content.split('\n')
             converted_lines = []
@@ -888,6 +962,21 @@ def convert_epub_to_md(epub_path: str, output_path: str,
             if calibre_conversions > 0:
                 original_content = '\n'.join(converted_lines)
                 print(f"     → Auto-converted {calibre_conversions} Calibre-style headings to markdown")
+
+        # ====================================================================
+        # AUTO-CONVERT TOC-ANCHORED CHAPTERS (Sway-style EPUBs)
+        # ====================================================================
+        # Some EPUBs have no real headings — chapter titles only exist as TOC
+        # links pointing to `[]{#anchor}` markers in the body. Reconstruct
+        # headings by mapping TOC anchors to titles and inserting at markers.
+
+        if re.search(r'^\[\]\{#[^}\s]+\}\s*$', original_content, re.MULTILINE):
+            anchor_map = build_toc_anchor_map(original_content)
+            original_content, toc_conversions = apply_toc_anchor_headings(
+                original_content, anchor_map
+            )
+            if toc_conversions > 0:
+                print(f"     → Auto-converted {toc_conversions} TOC-anchored sections to headings")
 
         # ====================================================================
         # CONTINUE WITH EXISTING FLOW (UNCHANGED)
@@ -963,7 +1052,6 @@ def convert_epub_to_md(epub_path: str, output_path: str,
         file_size_kb = cleaned_size / 1024
 
         # Count headings for quality check
-        import re
         heading_count = len(re.findall(r'^#{1,6}\s+', cleaned_content, re.MULTILINE))
 
         print(f"  📊 File size: {file_size_kb:.1f} KB")
@@ -1059,17 +1147,25 @@ def process_folder(input_folder: str, output_folder: str = "md processed books")
 
 def main():
     """Main entry point for the script."""
-    if len(sys.argv) < 2:
-        print("Usage: python epub_to_md_converter.py <input_folder> [output_folder]")
-        print("\nExample:")
-        print("  python epub_to_md_converter.py ./books")
-        print("  python epub_to_md_converter.py ./books ./converted")
-        sys.exit(1)
-    
-    input_folder = sys.argv[1]
-    output_folder = sys.argv[2] if len(sys.argv) > 2 else "md processed books"
-    
-    process_folder(input_folder, output_folder)
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='Convert EPUB files to AI-optimized Markdown',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python epub_to_md_converter.py ./books
+  python epub_to_md_converter.py ./books ./converted
+        """
+    )
+
+    parser.add_argument('input_folder', help='Folder containing EPUB files to convert')
+    parser.add_argument('output_folder', nargs='?', default='md processed books',
+                        help='Output folder for Markdown files (default: "md processed books")')
+
+    args = parser.parse_args()
+
+    process_folder(args.input_folder, args.output_folder)
 
 
 if __name__ == "__main__":

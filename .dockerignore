@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+._.DS_Store
+sample-epubs-for-testing/
+md processed books/
+converted_articles/
+converted_pdfs/
+test-output/
+.medium_cookies/
+.medium_chrome_profile/
+*.epub
+*.pdf
+*.md
+!README.md
+!QUICKSTART.md
+!ARCHITECTURE.md

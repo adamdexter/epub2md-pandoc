@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "epub2md"
+dynamic = ["version"]
+description = "Convert EPUB, PDF, and web articles to AI-optimized Markdown for Claude Projects and RAG systems"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Adam Dexter" },
+]
+keywords = ["epub", "pdf", "markdown", "converter", "rag", "claude", "ai", "pandoc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Markup",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "flask>=2.0.0",
+    "requests>=2.28.0",
+    "trafilatura>=1.6.0",
+    "beautifulsoup4>=4.11.0",
+    "readability-lxml>=0.8.1",
+    "pymupdf>=1.23.0",
+    "pdfplumber>=0.10.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+medium = [
+    "selenium>=4.0.0",
+    "webdriver-manager>=4.0.0",
+    "setuptools>=65.0.0",
+    "undetected-chromedriver>=3.5.0",
+]
+ocr = [
+    "pytesseract>=0.3.10",
+]
+all = [
+    "epub2md[medium,ocr]",
+]
+
+[project.urls]
+Homepage = "https://github.com/adamdexter/epub2md-pandoc"
+Repository = "https://github.com/adamdexter/epub2md-pandoc"
+Issues = "https://github.com/adamdexter/epub2md-pandoc/issues"
+
+[project.scripts]
+epub2md = "epub_to_md_converter:main"
+html2md = "html_to_md_converter:main"
+pdf2md = "pdf_to_md_converter:main"
+epub2md-gui = "gui:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "version.__version__" }
+
+[tool.setuptools]
+py-modules = [
+    "version",
+    "epub_to_md_converter",
+    "html_to_md_converter",
+    "pdf_to_md_converter",
+    "medium_scraper",
+    "gui",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "E722",  # bare except (used intentionally for graceful degradation)
+    "F841",  # local variable assigned but never used
+]

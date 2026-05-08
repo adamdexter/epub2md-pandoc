@@ -33,8 +33,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 
-# Script version for tracking conversions
-CONVERTER_VERSION = "2.1.0"
+from version import __version__ as CONVERTER_VERSION
 
 # ============================================================================
 # DEPENDENCY CHECKS

@@ -8,12 +8,18 @@ import os
 import sys
 import json
 import tempfile
+import shutil
+import uuid
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify
 from epub_to_md_converter import process_folder, check_pandoc_installed
+from version import __version__
 import threading
 import queue
-import io
+
+# Staging dir for files dropped into the GUI from the user's browser.
+# Server-managed so dragged uploads don't pollute the user's chosen folders.
+EPUB_STAGING_DIR = os.path.join(tempfile.gettempdir(), 'epub2md_staging')
 
 # Try to import HTML converter (may not be available if dependencies missing)
 HTML_CONVERTER_AVAILABLE = False
@@ -107,14 +113,15 @@ pdf_conversion_status = {
 }
 
 class OutputCapture:
-    """Capture stdout for progress reporting"""
-    def __init__(self):
+    """Capture stdout for progress reporting to a status dict."""
+    def __init__(self, status_dict):
         self.queue = queue.Queue()
+        self.status_dict = status_dict
 
     def write(self, text):
         if text.strip():
             self.queue.put(text)
-            conversion_status['progress'].append(text)
+            self.status_dict['progress'].append(text)
         sys.__stdout__.write(text)
 
     def flush(self):
@@ -124,7 +131,7 @@ class OutputCapture:
 @app.route('/')
 def index():
     """Render the main page"""
-    return render_template('index.html')
+    return render_template('index.html', version=__version__)
 
 
 @app.route('/check_pandoc')
@@ -134,46 +141,127 @@ def check_pandoc():
     return jsonify({'installed': installed})
 
 
+def _gather_epub_paths(items):
+    """
+    Resolve the items list (mix of file paths, folder paths, and staged uploads)
+    into a flat list of absolute paths to .epub files.
+
+    Each item is a dict with:
+      - kind: 'file' or 'folder'
+      - One of: path (absolute path on user's system) or upload_paths (list of
+        already-staged absolute paths under EPUB_STAGING_DIR).
+    """
+    epubs = []
+    errors = []
+
+    for item in items:
+        path = item.get('path')
+        upload_paths = item.get('upload_paths') or []
+
+        if upload_paths:
+            for up in upload_paths:
+                if os.path.isfile(up) and up.lower().endswith('.epub'):
+                    epubs.append(up)
+                else:
+                    errors.append(f'Staged upload missing or not an EPUB: {up}')
+            continue
+
+        if not path:
+            errors.append('Item missing both path and upload_paths')
+            continue
+
+        path = os.path.expanduser(path)
+        if not os.path.exists(path):
+            errors.append(f'Path does not exist: {path}')
+            continue
+
+        if os.path.isfile(path):
+            if path.lower().endswith('.epub'):
+                epubs.append(path)
+            else:
+                errors.append(f'Not an EPUB file: {path}')
+        elif os.path.isdir(path):
+            for child in sorted(Path(path).glob('*.epub')):
+                epubs.append(str(child))
+
+    return epubs, errors
+
+
 @app.route('/convert', methods=['POST'])
 def convert():
-    """Start the conversion process"""
+    """Start the conversion process from a list of items (files/folders/uploads)."""
     global conversion_status
 
-    data = request.json
-    input_folder = data.get('input_folder', '')
+    if conversion_status.get('running'):
+        return jsonify({'error': 'Another conversion is already running. Wait for it to finish.'}), 409
+
+    data = request.json or {}
+    items = data.get('items', [])
     output_folder = data.get('output_folder', 'md processed books')
 
-    if not input_folder:
-        return jsonify({'error': 'Input folder is required'}), 400
+    if not items:
+        return jsonify({'error': 'No input items selected'}), 400
 
-    # Validate input folder
-    if not os.path.exists(input_folder):
-        return jsonify({'error': f'Input folder does not exist: {input_folder}'}), 400
+    epub_paths, gather_errors = _gather_epub_paths(items)
 
-    if not os.path.isdir(input_folder):
-        return jsonify({'error': f'Input path is not a folder: {input_folder}'}), 400
+    if not epub_paths:
+        msg = 'No EPUB files found in selection.'
+        if gather_errors:
+            msg += ' Details: ' + '; '.join(gather_errors[:3])
+        return jsonify({'error': msg}), 400
+
+    # Stage all EPUBs into a fresh temp work dir so process_folder can iterate them
+    # uniformly regardless of source.
+    work_dir = tempfile.mkdtemp(prefix='epub2md_work_')
+    seen_names = set()
+    staged_uploads_to_clean = []
+    for src in epub_paths:
+        base = os.path.basename(src)
+        # Disambiguate duplicate filenames coming from different folders
+        name = base
+        i = 1
+        while name in seen_names:
+            stem, ext = os.path.splitext(base)
+            name = f'{stem} ({i}){ext}'
+            i += 1
+        seen_names.add(name)
+        try:
+            shutil.copy2(src, os.path.join(work_dir, name))
+            # Drag-drop uploads live under EPUB_STAGING_DIR; remove the staged copy
+            # now that it's been duplicated into the work dir. Files outside the
+            # staging dir are user-owned originals and must be left alone.
+            if os.path.commonpath([os.path.abspath(src), EPUB_STAGING_DIR]) == EPUB_STAGING_DIR:
+                staged_uploads_to_clean.append(src)
+        except Exception as e:
+            print(f'Warning: failed to stage {src}: {e}')
+
+    for src in staged_uploads_to_clean:
+        try:
+            os.remove(src)
+        except OSError:
+            pass
 
     # Reset status
     conversion_status = {
         'running': True,
         'progress': [],
         'current': 0,
-        'total': 0,
+        'total': len(epub_paths),
         'completed': False
     }
 
-    # Run conversion in background thread
+    if gather_errors:
+        for err in gather_errors:
+            conversion_status['progress'].append(f'Warning: {err}')
+
     def run_conversion():
         global conversion_status
         try:
-            # Capture output
             old_stdout = sys.stdout
-            sys.stdout = OutputCapture()
+            sys.stdout = OutputCapture(conversion_status)
 
-            # Run conversion
-            process_folder(input_folder, output_folder)
+            process_folder(work_dir, output_folder)
 
-            # Restore stdout
             sys.stdout = old_stdout
 
             conversion_status['completed'] = True
@@ -184,11 +272,14 @@ def convert():
             conversion_status['running'] = False
             conversion_status['completed'] = True
 
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
     thread = threading.Thread(target=run_conversion)
     thread.daemon = True
     thread.start()
 
-    return jsonify({'status': 'started'})
+    return jsonify({'status': 'started', 'count': len(epub_paths)})
 
 
 @app.route('/status')
@@ -253,8 +344,9 @@ def get_preferences():
     downloads = get_downloads_folder()
 
     return jsonify({
-        'input_folder': prefs.get('input_folder', downloads),
         'output_folder': prefs.get('output_folder', downloads),
+        'url_output_folder': prefs.get('url_output_folder', 'converted_articles'),
+        'pdf_output_folder': prefs.get('pdf_output_folder', 'converted_pdfs'),
         'has_saved_prefs': bool(prefs)
     })
 
@@ -265,10 +357,12 @@ def save_prefs():
     data = request.json
     prefs = load_preferences()
 
-    if 'input_folder' in data:
-        prefs['input_folder'] = data['input_folder']
     if 'output_folder' in data:
         prefs['output_folder'] = data['output_folder']
+    if 'url_output_folder' in data:
+        prefs['url_output_folder'] = data['url_output_folder']
+    if 'pdf_output_folder' in data:
+        prefs['pdf_output_folder'] = data['pdf_output_folder']
 
     success = save_preferences(prefs)
     return jsonify({'success': success})
@@ -276,39 +370,36 @@ def save_prefs():
 
 @app.route('/upload_file', methods=['POST'])
 def upload_file():
-    """Handle file upload from drag and drop"""
+    """Stage an EPUB upload into a server-managed temp dir.
+
+    Returns the staged absolute path; the client passes that path back in the
+    items list at convert time.
+    """
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided', 'success': False}), 400
 
     file = request.files['file']
-    target_folder = request.form.get('target_folder', '')
 
     if not file.filename:
         return jsonify({'error': 'No file selected', 'success': False}), 400
 
-    if not target_folder:
-        return jsonify({'error': 'No target folder specified', 'success': False}), 400
-
-    # Validate file extension
     if not file.filename.lower().endswith('.epub'):
         return jsonify({'error': 'Only EPUB files are allowed', 'success': False}), 400
 
     try:
-        # Expand and validate target folder
-        target_folder = os.path.expanduser(target_folder)
+        os.makedirs(EPUB_STAGING_DIR, exist_ok=True)
 
-        # Create folder if it doesn't exist
-        if not os.path.exists(target_folder):
-            os.makedirs(target_folder)
-
-        # Save file
-        file_path = os.path.join(target_folder, file.filename)
+        # Use a uuid prefix to avoid collisions between different drops with the
+        # same filename, while keeping the original name visible in the path.
+        safe_name = os.path.basename(file.filename)
+        staged_name = f'{uuid.uuid4().hex[:8]}_{safe_name}'
+        file_path = os.path.join(EPUB_STAGING_DIR, staged_name)
         file.save(file_path)
 
         return jsonify({
             'success': True,
             'path': file_path,
-            'filename': file.filename
+            'filename': safe_name
         })
 
     except Exception as e:
@@ -436,6 +527,110 @@ def native_folder_dialog():
     })
 
 
+def open_files_dialog_native(initial_dir, title, extensions):
+    """
+    Open a native multi-file picker dialog. Returns (paths, success, error).
+    `extensions` is a list of lowercase extensions like ['.epub', '.pdf'].
+    """
+    import subprocess
+    import shutil as _shutil
+
+    initial_dir = os.path.expanduser(initial_dir)
+    if not os.path.exists(initial_dir):
+        initial_dir = get_downloads_folder()
+
+    # Method 1: tkinter (cross-platform)
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+
+        ftypes = [(f'{ext.upper().lstrip(".")} files', f'*{ext}') for ext in extensions]
+        ftypes.append(('All files', '*.*'))
+
+        paths = filedialog.askopenfilenames(
+            initialdir=initial_dir,
+            title=title,
+            filetypes=ftypes
+        )
+        root.destroy()
+
+        if paths:
+            return list(paths), True, None
+        return [], False, None  # Cancelled
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Method 2: osascript (macOS)
+    if _shutil.which('osascript'):
+        try:
+            ext_clauses = ', '.join(f'"{ext.lstrip(".")}"' for ext in extensions)
+            script = f'''
+            set theFiles to choose file with prompt "{title}" default location POSIX file "{initial_dir}" of type {{{ext_clauses}}} with multiple selections allowed
+            set output to ""
+            repeat with f in theFiles
+                set output to output & (POSIX path of f) & linefeed
+            end repeat
+            return output
+            '''
+            result = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True, text=True, timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                paths = [p for p in result.stdout.strip().split('\n') if p]
+                return paths, True, None
+            elif result.returncode == 1:
+                return [], False, None  # Cancelled
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # Method 3: zenity (Linux)
+    if _shutil.which('zenity'):
+        try:
+            ext_filter = ' '.join(f'*{ext}' for ext in extensions)
+            result = subprocess.run(
+                ['zenity', '--file-selection', '--multiple', '--separator=\n',
+                 '--title=' + title, '--filename=' + initial_dir + '/',
+                 '--file-filter=' + ext_filter],
+                capture_output=True, text=True, timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                paths = [p for p in result.stdout.strip().split('\n') if p]
+                return paths, True, None
+            elif result.returncode == 1:
+                return [], False, None
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    return [], False, 'No native dialog tool available (install tkinter, or run on macOS/Linux with zenity)'
+
+
+@app.route('/native_files_dialog', methods=['POST'])
+def native_files_dialog():
+    """Open native multi-file picker dialog."""
+    data = request.json or {}
+    initial_dir = data.get('initial_dir', get_downloads_folder())
+    title = data.get('title', 'Select Files')
+    extensions = data.get('extensions', ['.epub'])
+
+    paths, success, error = open_files_dialog_native(initial_dir, title, extensions)
+
+    if error:
+        return jsonify({'error': error, 'selected': False}), 500
+
+    return jsonify({'paths': paths, 'selected': success})
+
+
 # ============================================================
 # URL to Markdown Conversion Routes
 # ============================================================
@@ -487,23 +682,7 @@ def convert_url():
         try:
             # Capture output
             old_stdout = sys.stdout
-            sys.stdout = OutputCapture()
-
-            # Redirect to url_conversion_status instead of conversion_status
-            class URLOutputCapture:
-                def __init__(self):
-                    self.queue = queue.Queue()
-
-                def write(self, text):
-                    if text.strip():
-                        self.queue.put(text)
-                        url_conversion_status['progress'].append(text)
-                    sys.__stdout__.write(text)
-
-                def flush(self):
-                    sys.__stdout__.flush()
-
-            sys.stdout = URLOutputCapture()
+            sys.stdout = OutputCapture(url_conversion_status)
 
             # Run conversion
             success, message, output_path = convert_url_to_markdown(
@@ -598,21 +777,7 @@ def convert_pdf():
         try:
             # Capture output
             old_stdout = sys.stdout
-
-            class PDFOutputCapture:
-                def __init__(self):
-                    self.queue = queue.Queue()
-
-                def write(self, text):
-                    if text.strip():
-                        self.queue.put(text)
-                        pdf_conversion_status['progress'].append(text)
-                    sys.__stdout__.write(text)
-
-                def flush(self):
-                    sys.__stdout__.flush()
-
-            sys.stdout = PDFOutputCapture()
+            sys.stdout = OutputCapture(pdf_conversion_status)
 
             # Run conversion
             success, message, output_path = convert_pdf_to_markdown(
@@ -692,10 +857,21 @@ def upload_pdf():
         return jsonify({'error': str(e), 'success': False}), 500
 
 
+def _sweep_staging_dir():
+    """Clear orphaned uploads from prior runs."""
+    if os.path.isdir(EPUB_STAGING_DIR):
+        try:
+            shutil.rmtree(EPUB_STAGING_DIR)
+        except OSError:
+            pass
+
+
 def main():
     """Start the Flask server"""
+    _sweep_staging_dir()
+
     print("=" * 60)
-    print("EPUB to Markdown Converter - Web GUI")
+    print(f"EPUB to Markdown Converter v{__version__} - Web GUI")
     print("=" * 60)
     print()
 
