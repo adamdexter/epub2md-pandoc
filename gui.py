@@ -4,18 +4,20 @@ EPUB & Web Article to Markdown Converter - Web GUI
 A Flask-based web interface for converting EPUBs and web articles to AI-optimized Markdown.
 """
 
-import os
-import sys
 import json
-import tempfile
+import os
+import queue
 import shutil
+import sys
+import tempfile
+import threading
 import uuid
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify
-from epub_to_md_converter import process_folder, check_pandoc_installed
+
+from flask import Flask, jsonify, render_template, request
+
+from epub_to_md_converter import check_pandoc_installed, process_folder
 from version import __version__
-import threading
-import queue
 
 # Staging dir for files dropped into the GUI from the user's browser.
 # Server-managed so dragged uploads don't pollute the user's chosen folders.
@@ -25,7 +27,7 @@ EPUB_STAGING_DIR = os.path.join(tempfile.gettempdir(), 'epub2md_staging')
 HTML_CONVERTER_AVAILABLE = False
 HTML_DEPENDENCIES_MISSING = []
 try:
-    from html_to_md_converter import convert_url_to_markdown, check_dependencies
+    from html_to_md_converter import check_dependencies, convert_url_to_markdown
     deps_ok, missing = check_dependencies()
     if deps_ok:
         HTML_CONVERTER_AVAILABLE = True
@@ -38,7 +40,8 @@ except ImportError as e:
 PDF_CONVERTER_AVAILABLE = False
 PDF_DEPENDENCIES_MISSING = []
 try:
-    from pdf_to_md_converter import convert_pdf_to_markdown, check_dependencies as check_pdf_dependencies
+    from pdf_to_md_converter import check_dependencies as check_pdf_dependencies
+    from pdf_to_md_converter import convert_pdf_to_markdown
     pdf_deps_ok, pdf_missing = check_pdf_dependencies()
     if pdf_deps_ok:
         PDF_CONVERTER_AVAILABLE = True
@@ -64,7 +67,7 @@ def load_preferences():
     """Load user preferences from file"""
     try:
         if os.path.exists(PREFERENCES_FILE):
-            with open(PREFERENCES_FILE, 'r') as f:
+            with open(PREFERENCES_FILE) as f:
                 return json.load(f)
     except Exception as e:
         print(f"Error loading preferences: {e}")
@@ -411,37 +414,62 @@ def open_folder_dialog_native(initial_dir, title):
     Try to open a native folder dialog using various methods.
     Returns (path, success, error_message)
     """
-    import subprocess
     import shutil
+    import subprocess
 
     # Ensure initial_dir exists
     initial_dir = os.path.expanduser(initial_dir)
     if not os.path.exists(initial_dir):
         initial_dir = get_downloads_folder()
 
-    # Method 1: Try tkinter
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
+    is_macos = sys.platform == 'darwin'
 
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
+    # On macOS, prefer osascript: tkinter must run on the main thread, but Flask
+    # handlers run on worker threads, so tk.Tk() from here hangs or crashes the
+    # process with an NSInternalInconsistencyException.
+    if is_macos and shutil.which('osascript'):
+        try:
+            script = f'''
+            set folderPath to POSIX path of (choose folder with prompt "{title}" default location POSIX file "{initial_dir}")
+            return folderPath
+            '''
+            result = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True, text=True, timeout=300
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().rstrip('/'), True, None
+            elif result.returncode == 1:
+                return '', False, None  # User cancelled
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
 
-        folder_path = filedialog.askdirectory(
-            initialdir=initial_dir,
-            title=title
-        )
-        root.destroy()
+    # Method 1: Try tkinter (safe on Linux/Windows from threads; skipped on macOS)
+    if not is_macos:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
 
-        if folder_path:
-            return folder_path, True, None
-        else:
-            return '', False, None  # User cancelled
-    except ImportError:
-        pass  # tkinter not available, try next method
-    except Exception as e:
-        pass  # tkinter failed, try next method
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+
+            folder_path = filedialog.askdirectory(
+                initialdir=initial_dir,
+                title=title
+            )
+            root.destroy()
+
+            if folder_path:
+                return folder_path, True, None
+            else:
+                return '', False, None  # User cancelled
+        except ImportError:
+            pass  # tkinter not available, try next method
+        except Exception as e:
+            pass  # tkinter failed, try next method
 
     # Method 2: Try zenity (Linux/GNOME)
     if shutil.which('zenity'):
@@ -480,28 +508,6 @@ def open_folder_dialog_native(initial_dir, title):
         except Exception:
             pass
 
-    # Method 4: Try osascript (macOS)
-    if shutil.which('osascript'):
-        try:
-            script = f'''
-            set folderPath to POSIX path of (choose folder with prompt "{title}" default location POSIX file "{initial_dir}")
-            return folderPath
-            '''
-            result = subprocess.run(
-                ['osascript', '-e', script],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip().rstrip('/'), True, None
-            elif result.returncode == 1:
-                return '', False, None  # User cancelled
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception:
-            pass
-
     # No native dialog method available
     return '', False, 'No native dialog tool available (install zenity, kdialog, or tkinter)'
 
@@ -532,46 +538,34 @@ def open_files_dialog_native(initial_dir, title, extensions):
     Open a native multi-file picker dialog. Returns (paths, success, error).
     `extensions` is a list of lowercase extensions like ['.epub', '.pdf'].
     """
-    import subprocess
     import shutil as _shutil
+    import subprocess
 
     initial_dir = os.path.expanduser(initial_dir)
     if not os.path.exists(initial_dir):
         initial_dir = get_downloads_folder()
 
-    # Method 1: tkinter (cross-platform)
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
+    is_macos = sys.platform == 'darwin'
 
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-
-        ftypes = [(f'{ext.upper().lstrip(".")} files', f'*{ext}') for ext in extensions]
-        ftypes.append(('All files', '*.*'))
-
-        paths = filedialog.askopenfilenames(
-            initialdir=initial_dir,
-            title=title,
-            filetypes=ftypes
-        )
-        root.destroy()
-
-        if paths:
-            return list(paths), True, None
-        return [], False, None  # Cancelled
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    # Method 2: osascript (macOS)
-    if _shutil.which('osascript'):
+    # On macOS, prefer osascript: tkinter requires the main thread, but Flask
+    # serves requests on worker threads, so tk.Tk() crashes the process there.
+    if is_macos and _shutil.which('osascript'):
         try:
-            ext_clauses = ', '.join(f'"{ext.lstrip(".")}"' for ext in extensions)
+            # AppleScript's `of type` clause expects UTIs (Uniform Type Identifiers),
+            # not bare extensions. Map known extensions; if any extension isn't
+            # mapped, drop the type filter rather than show an empty picker.
+            uti_map = {
+                '.epub': 'org.idpf.epub-container',
+                '.pdf': 'com.adobe.pdf',
+            }
+            utis = [uti_map.get(ext.lower()) for ext in extensions]
+            if all(utis):
+                type_clause = ' of type {' + ', '.join(f'"{u}"' for u in utis) + '}'
+            else:
+                type_clause = ''
+
             script = f'''
-            set theFiles to choose file with prompt "{title}" default location POSIX file "{initial_dir}" of type {{{ext_clauses}}} with multiple selections allowed
+            set theFiles to choose file with prompt "{title}" default location POSIX file "{initial_dir}"{type_clause} with multiple selections allowed
             set output to ""
             repeat with f in theFiles
                 set output to output & (POSIX path of f) & linefeed
@@ -583,11 +577,47 @@ def open_files_dialog_native(initial_dir, title, extensions):
                 capture_output=True, text=True, timeout=300
             )
             if result.returncode == 0 and result.stdout.strip():
-                paths = [p for p in result.stdout.strip().split('\n') if p]
-                return paths, True, None
+                # Defensive: enforce extension filter on returned paths in case
+                # `of type` was dropped (unknown extension) or the user bypassed it.
+                allowed = tuple(ext.lower() for ext in extensions)
+                paths = [
+                    p for p in result.stdout.strip().split('\n')
+                    if p and p.lower().endswith(allowed)
+                ]
+                if paths:
+                    return paths, True, None
+                return [], False, None
             elif result.returncode == 1:
                 return [], False, None  # Cancelled
         except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # Method 1: tkinter (Linux/Windows; skipped on macOS due to main-thread requirement)
+    if not is_macos:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+
+            ftypes = [(f'{ext.upper().lstrip(".")} files', f'*{ext}') for ext in extensions]
+            ftypes.append(('All files', '*.*'))
+
+            paths = filedialog.askopenfilenames(
+                initialdir=initial_dir,
+                title=title,
+                filetypes=ftypes
+            )
+            root.destroy()
+
+            if paths:
+                return list(paths), True, None
+            return [], False, None  # Cancelled
+        except ImportError:
             pass
         except Exception:
             pass
@@ -895,5 +925,124 @@ def main():
     app.run(debug=False, host='127.0.0.1', port=3763)
 
 
+def _server_responds(url, timeout=0.5):
+    """Return True if something is already serving at url."""
+    import urllib.request
+    try:
+        urllib.request.urlopen(url, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def run_app_window():
+    """Run as a native desktop app: serve Flask in a background thread and show
+    the UI in a native WebKit window owned by this process (and thus by the
+    epub2md.app bundle, so it gets our icon in the Dock and Cmd+Tab switcher)."""
+    import threading
+    import time
+
+    import webview  # lazy import: only the .app window mode needs pywebview
+
+    host, port = '127.0.0.1', 3763
+    url = f'http://{host}:{port}'
+
+    # Start the server only if it isn't already up (a second launch reuses it
+    # instead of crashing on the port bind).
+    if not _server_responds(url):
+        threading.Thread(
+            target=lambda: app.run(
+                host=host, port=port, debug=False, use_reloader=False, threaded=True
+            ),
+            daemon=True,
+        ).start()
+        for _ in range(120):  # wait up to ~30s for the server to come up
+            if _server_responds(url):
+                break
+            time.sleep(0.25)
+
+    # We run under the framework Python (bundle "Python.app"), so without help the
+    # Dock/Cmd+Tab icon and app name would be Python's. Set our name in the app
+    # menu, and pass our .icns so pywebview overrides the Dock/switcher icon.
+    try:
+        from Foundation import NSBundle
+        _info = NSBundle.mainBundle().infoDictionary()
+        if _info is not None:
+            _info['CFBundleName'] = 'epub2md'
+    except Exception:
+        pass
+
+    icon = os.environ.get('EPUB2MD_ICNS') or None
+
+    # The UI is a fixed 900px-wide card (+20px body padding each side); its height
+    # is content-driven. Open the window hidden, size it to fit the whole app once
+    # the page has laid out, then reveal it — so it always opens fully visible and
+    # never needs manual resizing.
+    window = webview.create_window(
+        'epub2md', url, width=960, height=1100, min_size=(820, 600), hidden=True
+    )
+
+    # Measure the tallest tab so every tab fits without resizing. Each .tab-content
+    # is activated in turn (others are display:none), and we take the max container
+    # height; +40 accounts for the 20px body padding top and bottom.
+    measure_js = (
+        "(function(){"
+        "var cs=Array.prototype.slice.call(document.querySelectorAll('.tab-content'));"
+        "if(!cs.length){return null;}"
+        "var active=document.querySelector('.tab-content.active');"
+        "var maxH=0;"
+        "cs.forEach(function(c){"
+        "cs.forEach(function(x){x.classList.remove('active');});"
+        "c.classList.add('active');"
+        "var h=document.querySelector('.container').getBoundingClientRect().height;"
+        "if(h>maxH){maxH=h;}});"
+        "cs.forEach(function(x){x.classList.remove('active');});"
+        "if(active){active.classList.add('active');}"
+        "var cw=document.querySelector('.container').getBoundingClientRect().width;"
+        "return [Math.ceil(cw)+40, Math.ceil(maxH)+40];})()"
+    )
+
+    shown = {'done': False}
+
+    def _fit_and_show(*_):
+        w_px, h_px = 960, 1340  # fallback sized to fit the tallest tab if JS fails
+        try:
+            dims = window.evaluate_js(measure_js)
+            if dims:
+                w_px, h_px = int(dims[0]), int(dims[1])
+        except Exception:
+            pass
+        try:  # never grow past the visible screen work area
+            scr = webview.screens[0]
+            w_px = min(w_px, int(scr.width) - 40)
+            h_px = min(h_px, int(scr.height) - 100)
+        except Exception:
+            pass
+        try:
+            window.resize(max(w_px, 820), max(h_px, 600))
+        except Exception:
+            pass
+        shown['done'] = True
+        window.show()
+
+    window.events.loaded += _fit_and_show
+
+    # Failsafe: reveal the window even if the loaded event never fires.
+    def _failsafe_show():
+        time.sleep(3)
+        if not shown['done']:
+            try:
+                window.show()
+            except Exception:
+                pass
+
+    threading.Thread(target=_failsafe_show, daemon=True).start()
+
+    webview.start(icon=icon)  # icon → Dock & Cmd+Tab switcher icon on macOS
+
+
 if __name__ == '__main__':
-    main()
+    if '--window' in sys.argv:
+        run_app_window()
+    else:
+        main()

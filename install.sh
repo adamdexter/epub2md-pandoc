@@ -4,6 +4,36 @@
 
 set -e  # Exit on error
 
+# --- Make Homebrew / standalone tools findable -------------------------------
+# Apps launched from Finder inherit a minimal PATH (no /opt/homebrew/bin), which
+# is why a GUI launch can't find pandoc even when it's installed. Rebuild a sane
+# PATH, including our own managed bin dir for brew-free installs.
+EPUB2MD_SUPPORT="$HOME/Library/Application Support/epub2md"
+export PATH="$EPUB2MD_SUPPORT/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"
+if command -v brew &> /dev/null; then
+    export PATH="$(brew --prefix)/bin:$PATH"
+fi
+
+# --- Non-interactive mode (used by the macOS app for zero-touch setup) --------
+# With --yes / -y / EPUB2MD_NONINTERACTIVE=1, never prompt — auto-install instead.
+AUTO_YES=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --yes|-y|--noninteractive) AUTO_YES=1 ;;
+    esac
+done
+[ "${EPUB2MD_NONINTERACTIVE:-0}" = "1" ] && AUTO_YES=1
+
+# Ask a yes/no question, or auto-confirm when running non-interactively.
+confirm() {
+    if [ "$AUTO_YES" = "1" ]; then
+        return 0
+    fi
+    read -p "$1 (y/n) " -n 1 -r
+    echo
+    [[ $REPLY =~ ^[Yy]$ ]]
+}
+
 echo "=========================================="
 echo "EPUB, Web & PDF to Markdown Converter"
 echo "            Installer v2.7.0"
@@ -97,6 +127,46 @@ check_pandoc() {
     fi
 }
 
+# Install a standalone Pandoc binary (no Homebrew, no admin password) into the
+# app's managed support dir. Used as a fallback when Homebrew isn't available so
+# setup can still be fully zero-touch.
+install_pandoc_standalone() {
+    print_info "Installing standalone Pandoc (no Homebrew required)..."
+    local bindir="$EPUB2MD_SUPPORT/bin"
+    mkdir -p "$bindir"
+
+    local asset
+    case "$(uname -m)" in
+        arm64) asset="arm64-macOS" ;;
+        *)     asset="x86_64-macOS" ;;
+    esac
+
+    # Find the latest release asset URL for this architecture.
+    local url
+    url="$(curl -fsSL https://api.github.com/repos/jgm/pandoc/releases/latest \
+        | grep -oE "https://[^\"]+pandoc-[^\"]+-${asset}\.zip" | head -1 || true)"
+    if [ -z "$url" ]; then
+        print_error "Could not find a Pandoc download for ${asset}."
+        return 1
+    fi
+
+    local tmp
+    tmp="$(mktemp -d)"
+    if curl -fsSL "$url" -o "$tmp/pandoc.zip" && unzip -q "$tmp/pandoc.zip" -d "$tmp"; then
+        local bin
+        bin="$(find "$tmp" -type f -name pandoc | head -1 || true)"
+        if [ -n "$bin" ]; then
+            cp "$bin" "$bindir/pandoc"
+            chmod +x "$bindir/pandoc"
+            rm -rf "$tmp"
+            print_success "Pandoc installed to $bindir"
+            return 0
+        fi
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
 # Install Pandoc
 install_pandoc() {
     print_info "Installing Pandoc..."
@@ -115,12 +185,18 @@ install_pandoc() {
             exit 1
         fi
     elif [ "$OS" == "macos" ]; then
-        if command -v brew &> /dev/null; then
-            brew install pandoc
-        else
-            print_error "Homebrew not found. Please install Homebrew first: https://brew.sh"
-            exit 1
+        # Prefer Homebrew; fall back to a standalone binary so setup never needs
+        # the user to install anything by hand.
+        if command -v brew &> /dev/null && brew install pandoc; then
+            print_success "Pandoc installed successfully"
+            return 0
         fi
+        if install_pandoc_standalone; then
+            return 0
+        fi
+        print_error "Could not install Pandoc automatically."
+        print_error "Install it manually from https://pandoc.org/installing.html"
+        exit 1
     fi
 
     print_success "Pandoc installed successfully"
@@ -171,6 +247,13 @@ setup_venv() {
     echo "Setting up virtual environment..."
 
     VENV_DIR=".venv"
+
+    # If a venv exists but its interpreter is missing/broken (e.g. it pointed at
+    # a Python that was since removed), rebuild it from scratch.
+    if [ -d "$VENV_DIR" ] && ! "$VENV_DIR/bin/python3" -c "pass" &> /dev/null; then
+        print_info "Existing virtual environment is broken — rebuilding..."
+        rm -rf "$VENV_DIR"
+    fi
 
     # Check if venv already exists
     if [ -d "$VENV_DIR" ]; then
@@ -285,9 +368,7 @@ main() {
 
     # Check and install Python
     if ! check_python; then
-        read -p "Would you like to install Python 3? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if confirm "Would you like to install Python 3?"; then
             install_python
         else
             print_error "Python 3 is required. Exiting."
@@ -297,9 +378,7 @@ main() {
 
     # Check and install Pandoc
     if ! check_pandoc; then
-        read -p "Would you like to install Pandoc? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if confirm "Would you like to install Pandoc?"; then
             install_pandoc
         else
             print_error "Pandoc is required. Exiting."
@@ -309,9 +388,7 @@ main() {
 
     # Check and install zenity (Linux only - optional but recommended for native dialogs)
     if ! check_zenity; then
-        read -p "Would you like to install zenity for native folder dialogs? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if confirm "Would you like to install zenity for native folder dialogs?"; then
             install_zenity
         else
             print_info "Skipping zenity - GUI will use built-in folder browser"

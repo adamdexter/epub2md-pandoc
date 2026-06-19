@@ -74,6 +74,32 @@ Download from [pandoc.org](https://pandoc.org/installing.html)
 pandoc --version
 ```
 
+## One-Click App (macOS)
+
+Want to launch with a single click — no Terminal, ever? Build a native macOS app:
+
+```bash
+./make_app.sh
+```
+
+This creates **`epub2md.app`** in the project folder. Then:
+
+1. **Double-click `epub2md.app`** to launch. The first run sets everything up
+   automatically (you'll see a "First-time setup…" notification), then the
+   converter opens in its **own native window** — no browser tabs, no address
+   bar. It shows up under its own icon and name in the Dock and the ⌘-Tab
+   switcher.
+2. **Drag `epub2md.app` onto your Dock** to keep a permanent one-click shortcut.
+   (You can also `./make_app.sh --install` to copy it into `~/Applications`.)
+3. **To quit:** just close the window (or ⌘-Q). The app serves the converter and
+   hosts the window in one process, so closing it shuts everything down cleanly.
+
+If you move the project folder later, just re-run `./make_app.sh` to rebuild the app.
+
+> Requires Python 3 and Pandoc (see [Requirements](#requirements)). The app
+> auto-installs anything missing on first launch with no prompts. The native
+> window uses `pywebview` (installed automatically into the project's venv).
+
 ## Quick Start (Recommended)
 
 ### 1. Install Dependencies

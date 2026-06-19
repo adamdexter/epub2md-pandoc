@@ -17,6 +17,9 @@ build/
 *.egg-info/
 *.egg
 
+# Generated macOS app bundle (has the local project path baked in; rebuild with make_app.sh)
+epub2md*.app/
+
 # Medium session data (contains auth cookies - never commit)
 .medium_cookies/
 .medium_chrome_profile/
