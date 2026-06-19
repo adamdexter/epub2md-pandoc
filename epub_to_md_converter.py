@@ -920,7 +920,8 @@ def convert_epub_to_md(epub_path: str, output_path: str,
             '--markdown-headings=atx',      # Use # style headings
             '--wrap=none',                   # Don't wrap lines
             '--strip-comments',              # Remove HTML comments
-            '--reference-links=false',       # Use inline links
+            # (inline links are pandoc's default; the old `--reference-links=false`
+            #  is rejected by older pandoc — e.g. CI's — so we just omit it)
             '--standalone',                  # Produce standalone document
         ]
 
