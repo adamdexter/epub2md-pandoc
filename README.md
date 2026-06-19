@@ -732,7 +732,12 @@ export ANTHROPIC_API_KEY=sk-ant-...
 To enable the autonomous fixer (the GitHub side):
 
 1. Install the **Claude GitHub App** on the repo (https://github.com/apps/claude).
-2. Add a repo secret **`ANTHROPIC_API_KEY`** (Settings → Secrets → Actions).
+2. Add the auth secret the Action uses:
+   - **Claude Pro/Max subscription:** `claude setup-token` (opens a browser, prints a
+     token), then `gh secret set CLAUDE_CODE_OAUTH_TOKEN`. The workflow already uses
+     `claude_code_oauth_token`.
+   - **Anthropic API key instead:** `gh secret set ANTHROPIC_API_KEY` and switch the
+     workflow input back to `anthropic_api_key:`.
 3. Enable **Allow auto-merge** and a **branch-protection rule** on `main` requiring the
    `test` and `lint` checks.
 

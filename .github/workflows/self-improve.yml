@@ -33,7 +33,9 @@ jobs:
       - name: Implement the fix with Claude Code
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Claude Pro/Max subscription auth (generate with `claude setup-token`).
+          # For an API key instead, swap this for: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--model claude-opus-4-8 --max-turns 40"
           prompt: |
             A self-improvement evaluator filed issue #${{ github.event.issue.number }}
