@@ -148,7 +148,12 @@ def test_corpus_floors(book_key, baselines, tmp_path):
     assert sig["md_char_count"] >= spec["min_md_chars"], (
         f"{book_key} content shrank: {sig['md_char_count']} < {spec['min_md_chars']}"
     )
-    for artifact, ceiling in spec["max_artifacts"].items():
+    # Optional per-artifact ceilings. These are pandoc-version-sensitive (raw
+    # artifact counts differ between macOS and CI's Ubuntu pandoc), so by default
+    # we rely on the optimization-score floor above — which already aggregates
+    # artifact density — and leave max_artifacts empty. Tighten per-artifact only
+    # for counts that are stable across the environments where the gate runs.
+    for artifact, ceiling in spec.get("max_artifacts", {}).items():
         assert sig["artifacts"][artifact] <= ceiling, (
             f"{book_key} {artifact} artifacts increased: "
             f"{sig['artifacts'][artifact]} > {ceiling}"

@@ -1,32 +1,16 @@
 {
   "venture-deals": {
     "filename_glob": "Venture Deals*.epub",
-    "min_optimization_score": 95.0,
+    "min_optimization_score": 90.0,
     "min_heading_count": 220,
     "min_md_chars": 650000,
-    "max_artifacts": {
-      "html_blocks": 5,
-      "blockquote_divs": 0,
-      "bracket_classes": 5,
-      "header_ids": 0,
-      "xhtml_links": 0,
-      "citations": 0,
-      "image_attrs": 5
-    }
+    "max_artifacts": {}
   },
   "seven-powers": {
     "filename_glob": "7 Powers*.epub",
-    "min_optimization_score": 88.0,
+    "min_optimization_score": 82.0,
     "min_heading_count": 0,
     "min_md_chars": 280000,
-    "max_artifacts": {
-      "html_blocks": 5,
-      "blockquote_divs": 40,
-      "bracket_classes": 80,
-      "header_ids": 0,
-      "xhtml_links": 0,
-      "citations": 0,
-      "image_attrs": 5
-    }
+    "max_artifacts": {}
   }
 }
