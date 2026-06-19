@@ -14,12 +14,14 @@ pytest -q
 |---|---|---|
 | Oracle unit tests (scoring functions on synthetic Markdown) | ✅ | ✅ |
 | End-to-end synthetic EPUB conversion | ✅ | ✅ |
-| Corpus floors/ceilings (real sample books) | ⏭️ skipped | ✅ |
+| Corpus floors/ceilings (real sample books) | ✅ (EPUBs are committed) | ✅ |
 | Baseline-tamper guard (vs `origin/main`) | ✅ | ✅ |
 
-The corpus tests need the real EPUBs, which are **gitignored** (copyrighted) and
-absent in CI, so they `pytest.skip` there. CI's teeth come from the synthetic
-end-to-end conversion plus the oracle unit tests.
+The sample EPUBs are committed to the repo, so the corpus tests run **in CI too**
+(they only `pytest.skip` if the EPUBs are removed). Because the auto-merge gate
+runs in CI, **`baselines.json` is calibrated to CI's (Ubuntu) pandoc**, which can
+differ from a local macOS pandoc — keep the floors comfortably below the lowest
+of the two so the gate catches real regressions without false failures.
 
 ## Sample corpus
 

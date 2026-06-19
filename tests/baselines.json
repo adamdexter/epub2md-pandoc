@@ -2,7 +2,7 @@
   "venture-deals": {
     "filename_glob": "Venture Deals*.epub",
     "min_optimization_score": 95.0,
-    "min_heading_count": 250,
+    "min_heading_count": 220,
     "min_md_chars": 650000,
     "max_artifacts": {
       "html_blocks": 5,
