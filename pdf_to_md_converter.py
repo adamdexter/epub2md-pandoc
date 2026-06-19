@@ -25,13 +25,11 @@ Usage:
 import os
 import re
 import sys
-import json
-import tempfile
-from pathlib import Path
-from typing import Optional, Tuple, Dict, List, Any, Union
-from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+from pathlib import Path
+from typing import Any, Optional
 
 from version import __version__ as CONVERTER_VERSION
 
@@ -95,11 +93,11 @@ calculate_reading_time = None
 sanitize_filename = None
 try:
     from html_to_md_converter import (
-        clean_markdown_for_rag,
         calculate_reading_time,
-        sanitize_filename,
+        clean_markdown_for_rag,
         extract_toc_from_markdown,
         remove_marketing_content,
+        sanitize_filename,
     )
     HTML_CONVERTER_AVAILABLE = True
 except ImportError:
@@ -132,7 +130,7 @@ class ExtractionTool(Enum):
 class FigureInfo:
     """Information about a detected figure/chart in the PDF."""
     page: int
-    bbox: List[float]  # [x0, y0, x1, y1]
+    bbox: list[float]  # [x0, y0, x1, y1]
     fig_type: str      # "chart", "diagram", "image", "table_image"
     has_text: bool
     confidence: float = 0.0
@@ -150,9 +148,9 @@ class PDFAnalysis:
     font_count: int
     document_type: DocumentType
     recommended_tool: ExtractionTool
-    figures: List[FigureInfo] = field(default_factory=list)
+    figures: list[FigureInfo] = field(default_factory=list)
     total_chars: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -163,7 +161,7 @@ class ConversionScore:
     structure: float         # headers, hierarchy
     table_integrity: float   # rows/columns preserved
     readability: float       # no garbage characters
-    issues: List[str] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -217,7 +215,7 @@ if not HTML_CONVERTER_AVAILABLE:
     calculate_reading_time = _calculate_reading_time_fallback
     clean_markdown_for_rag = _clean_markdown_fallback
 
-    def extract_toc_from_markdown(content: str) -> List[Dict[str, Any]]:
+    def extract_toc_from_markdown(content: str) -> list[dict[str, Any]]:
         """
         Extract actual section headings for TOC, filtering out noise.
         """
@@ -424,7 +422,7 @@ def analyze_pdf(pdf_path: str) -> PDFAnalysis:
     if not PYMUPDF_AVAILABLE:
         raise RuntimeError("PyMuPDF (fitz) is required for PDF analysis. Install with: pip install pymupdf")
 
-    print(f"      Opening PDF...", flush=True)
+    print("      Opening PDF...", flush=True)
 
     try:
         doc = fitz.open(pdf_path)
@@ -587,7 +585,7 @@ def analyze_pdf(pdf_path: str) -> PDFAnalysis:
 # CONVERSION TOOL WRAPPERS
 # ============================================================================
 
-def convert_with_pymupdf(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dict[str, Any]]:
+def convert_with_pymupdf(pdf_path: str, analysis: PDFAnalysis) -> tuple[str, dict[str, Any]]:
     """
     Convert PDF using PyMuPDF (fast text extraction).
 
@@ -646,7 +644,7 @@ def convert_with_pymupdf(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dic
     return markdown_content, metadata
 
 
-def _process_pymupdf_page(text_dict: Dict) -> str:
+def _process_pymupdf_page(text_dict: dict) -> str:
     """Process PyMuPDF text dict to infer structure."""
     lines = []
     prev_size = None
@@ -708,7 +706,7 @@ def _process_pymupdf_page(text_dict: Dict) -> str:
     return "\n\n".join(lines)
 
 
-def convert_with_pdfplumber(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dict[str, Any]]:
+def convert_with_pdfplumber(pdf_path: str, analysis: PDFAnalysis) -> tuple[str, dict[str, Any]]:
     """
     Convert PDF using pdfplumber (excellent table extraction).
 
@@ -772,7 +770,7 @@ def convert_with_pdfplumber(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, 
     return markdown_content, result_metadata
 
 
-def _convert_table_to_markdown(table: List[List]) -> str:
+def _convert_table_to_markdown(table: list[list]) -> str:
     """Convert a table to markdown format."""
     if not table or len(table) < 1:
         return ""
@@ -813,7 +811,7 @@ def _convert_table_to_markdown(table: List[List]) -> str:
     return "\n".join(lines)
 
 
-def convert_with_marker(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dict[str, Any]]:
+def convert_with_marker(pdf_path: str, analysis: PDFAnalysis) -> tuple[str, dict[str, Any]]:
     """
     Convert PDF using Marker (best overall quality, layout-aware).
 
@@ -849,7 +847,7 @@ def convert_with_marker(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dict
     return markdown_content, metadata
 
 
-def convert_with_ocr(pdf_path: str, analysis: PDFAnalysis) -> Tuple[str, Dict[str, Any]]:
+def convert_with_ocr(pdf_path: str, analysis: PDFAnalysis) -> tuple[str, dict[str, Any]]:
     """
     OCR the PDF first, then convert.
 
@@ -1076,7 +1074,7 @@ def score_conversion(original_analysis: PDFAnalysis, markdown_output: str) -> Co
 # ============================================================================
 
 def generate_pdf_yaml_frontmatter(
-    metadata: Dict[str, Any],
+    metadata: dict[str, Any],
     pdf_path: str,
     analysis: PDFAnalysis,
     reading_time: int,
@@ -1136,7 +1134,7 @@ def generate_pdf_yaml_frontmatter(
 # MAIN CONVERTER
 # ============================================================================
 
-def check_dependencies() -> Tuple[bool, List[str]]:
+def check_dependencies() -> tuple[bool, list[str]]:
     """Check if required dependencies are installed."""
     missing = []
 
@@ -1154,7 +1152,7 @@ def convert_pdf_to_markdown(
     pdf_path: str,
     output_dir: str,
     accuracy_critical: bool = False
-) -> Tuple[bool, str, Optional[str]]:
+) -> tuple[bool, str, Optional[str]]:
     """
     Main entry point for PDF to Markdown conversion.
 
@@ -1333,7 +1331,7 @@ def convert_pdf_to_markdown(
         file_size = filepath.stat().st_size / 1024
 
         print(f"\n{'='*60}", flush=True)
-        print(f"SUCCESS!", flush=True)
+        print("SUCCESS!", flush=True)
         print(f"Output: {filepath}", flush=True)
         print(f"Size: {file_size:.1f} KB", flush=True)
         print(f"Quality Score: {best_score.overall_score:.2f}", flush=True)
@@ -1347,7 +1345,7 @@ def convert_pdf_to_markdown(
         return False, f"Conversion failed: {str(e)}", None
 
 
-def _get_tool_order(analysis: PDFAnalysis) -> List[ExtractionTool]:
+def _get_tool_order(analysis: PDFAnalysis) -> list[ExtractionTool]:
     """Get ordered list of tools to try based on document type."""
     if analysis.document_type == DocumentType.SCANNED:
         return [

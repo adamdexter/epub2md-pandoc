@@ -2,6 +2,36 @@
 
 All notable changes to epub2md-pandoc are tracked here.
 
+## [3.2.0] - 2026-06-19
+
+### Added
+- **Self-Improvement mode (experimental)** — a toggle-able loop that lets the
+  converter detect and fix its own conversion-quality regressions:
+  - When enabled (EPUB tab toggle), after each conversion an LLM-as-judge
+    (`self_improve.py`, Anthropic SDK, `claude-opus-4-8` by default / `claude-sonnet-4-6`
+    as a cost option) compares the original EPUB's reference text to the produced
+    Markdown and returns structured findings (`messages.parse` + Pydantic schema).
+  - Real problems are filed as de-duplicated GitHub issues labelled `self-improvement`;
+    a Claude Code GitHub Action (`.github/workflows/self-improve.yml`) implements the
+    fix, runs the regression suite + ruff, opens a PR, and **auto-merges on green CI**.
+  - Safety rails: a regression test suite (`tests/`) as the merge gate, a
+    baseline-tamper guard, a CI scope-guard (the coder can't edit CI/workflows), a
+    dedup ledger + per-run/per-day caps + a circuit breaker (routes risky/recurring
+    findings to a `self-improvement-hold` label) in `~/.epub2md_eval_history.json`,
+    and the toggle itself as a kill switch.
+- **New `epub_text.py`** — spine-aware plain-text extraction from EPUBs for the judge.
+- **Regression test suite (`tests/`)** — pytest harness with a synthetic-EPUB
+  end-to-end conversion (runs in CI), oracle unit tests, optional real-corpus
+  floors/ceilings, and the baseline-tamper guard. `pytest -q` is now the CI gate.
+- `epub_to_md_converter.process_folder()` now returns `(epub_path, md_path)` pairs;
+  new `collect_quality_signals()` shares one quality oracle between the judge and tests.
+
+### Fixed
+- **CI workflow was malformed YAML** (an inline `run:` step contained a colon-space
+  inside an unquoted scalar) and had never run successfully — converted to block
+  scalars so CI executes.
+- Cleared all pre-existing `ruff` violations repo-wide so `lint` passes.
+
 ## [3.1.0] - 2026-05-07
 
 ### Added

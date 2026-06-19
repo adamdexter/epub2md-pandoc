@@ -131,6 +131,52 @@ class OutputCapture:
         sys.__stdout__.flush()
 
 
+# Global state for the self-improvement evaluation (mirrors the conversion status).
+self_improvement_status = {
+    'running': False,
+    'progress': [],
+    'evaluated': 0,
+    'total': 0,
+    'issues_filed': 0,
+    'completed': False,
+}
+
+
+def _run_self_improvement(pairs, model):
+    """Judge each converted EPUB and file issues. Self-contained: never raises."""
+    global self_improvement_status
+    self_improvement_status = {
+        'running': True, 'progress': [], 'evaluated': 0,
+        'total': len(pairs), 'issues_filed': 0, 'completed': False,
+    }
+
+    def log(msg):
+        self_improvement_status['progress'].append(str(msg))
+        sys.__stdout__.write(str(msg) + "\n")
+
+    try:
+        import self_improve
+    except Exception as e:
+        log(f"Self-improvement unavailable (install the 'selfimprove' extra): {e}")
+        self_improvement_status['running'] = False
+        self_improvement_status['completed'] = True
+        return
+
+    for epub_path, md_path in pairs:
+        try:
+            result = self_improve.evaluate_conversion(epub_path, md_path, model=model, logger=log)
+            self_improvement_status['evaluated'] += 1
+            self_improvement_status['issues_filed'] += int(result.get('filed') or 0)
+            log(f"Evaluated {os.path.basename(epub_path)}: {result.get('status')} "
+                f"({result.get('filed', 0)} issue(s) filed)")
+        except Exception as e:
+            log(f"Evaluation error for {os.path.basename(epub_path)}: {e}")
+
+    self_improvement_status['running'] = False
+    self_improvement_status['completed'] = True
+    log(f"Self-improvement complete: {self_improvement_status['issues_filed']} issue(s) filed.")
+
+
 @app.route('/')
 def index():
     """Render the main page"""
@@ -259,16 +305,27 @@ def convert():
 
     def run_conversion():
         global conversion_status
+        pairs = []
         try:
             old_stdout = sys.stdout
             sys.stdout = OutputCapture(conversion_status)
 
-            process_folder(work_dir, output_folder)
+            pairs = process_folder(work_dir, output_folder)
 
             sys.stdout = old_stdout
 
             conversion_status['completed'] = True
             conversion_status['running'] = False
+
+            # Self-improvement judge runs BEFORE work_dir cleanup (it needs the
+            # original EPUBs). Gated by the toggle and isolated so it can never
+            # affect the conversion result.
+            prefs = load_preferences()
+            if prefs.get('self_improvement_enabled') and pairs:
+                try:
+                    _run_self_improvement(pairs, prefs.get('self_improve_model'))
+                except Exception as si_err:
+                    print(f"Self-improvement error: {si_err}")
 
         except Exception as e:
             conversion_status['progress'].append(f"Error: {str(e)}")
@@ -289,6 +346,12 @@ def convert():
 def status():
     """Get conversion status"""
     return jsonify(conversion_status)
+
+
+@app.route('/self_improve_status')
+def self_improve_status():
+    """Get self-improvement evaluation status"""
+    return jsonify(self_improvement_status)
 
 
 @app.route('/browse_folder', methods=['POST'])
@@ -350,6 +413,8 @@ def get_preferences():
         'output_folder': prefs.get('output_folder', downloads),
         'url_output_folder': prefs.get('url_output_folder', 'converted_articles'),
         'pdf_output_folder': prefs.get('pdf_output_folder', 'converted_pdfs'),
+        'self_improvement_enabled': prefs.get('self_improvement_enabled', False),
+        'self_improve_model': prefs.get('self_improve_model', 'claude-opus-4-8'),
         'has_saved_prefs': bool(prefs)
     })
 
@@ -366,6 +431,10 @@ def save_prefs():
         prefs['url_output_folder'] = data['url_output_folder']
     if 'pdf_output_folder' in data:
         prefs['pdf_output_folder'] = data['pdf_output_folder']
+    if 'self_improvement_enabled' in data:
+        prefs['self_improvement_enabled'] = bool(data['self_improvement_enabled'])
+    if 'self_improve_model' in data:
+        prefs['self_improve_model'] = data['self_improve_model']
 
     success = save_preferences(prefs)
     return jsonify({'success': success})

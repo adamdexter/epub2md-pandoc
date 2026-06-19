@@ -1,0 +1,83 @@
+name: Self-Improvement Coder
+
+# Triggered when the self-improvement judge (or a human) labels an issue
+# `self-improvement`. Claude Code implements the fix on a branch, runs the
+# regression suite + ruff, opens a PR that closes the issue, and enables
+# auto-merge so it lands on `main` once required checks (test + lint) are green.
+#
+# The circuit breaker routes risky/recurring findings to the `self-improvement-hold`
+# label instead, which this workflow deliberately does NOT match.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+# One coder run per issue at a time (oscillation / duplicate-run prevention).
+concurrency:
+  group: self-improve-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  implement-fix:
+    if: github.event.label.name == 'self-improvement'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Implement the fix with Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--model claude-opus-4-8 --max-turns 40"
+          prompt: |
+            A self-improvement evaluator filed issue #${{ github.event.issue.number }}
+            in ${{ github.repository }} describing an EPUB-to-Markdown conversion-quality
+            defect. Implement a focused fix.
+
+            Requirements:
+            - Read the issue body for the defect, the evidence excerpt, and the suggested fix.
+            - Make the change in the converter modules (epub_to_md_converter.py,
+              html_to_md_converter.py, or pdf_to_md_converter.py) as appropriate.
+              You MAY also update CHANGELOG.md, README.md, and version.py.
+            - You MUST NOT edit anything under .github/, the CI configuration, or
+              tests/baselines.json. Do not weaken the regression baselines to make
+              tests pass — fix the converter, not the gate.
+            - Run `pytest -q` and `ruff check .` and make both pass before opening the PR.
+            - Open a pull request that closes #${{ github.event.issue.number }}, with a
+              clear description of the root cause and the fix.
+            - After opening the PR, enable auto-merge on it:
+              `gh pr merge --auto --squash <pr-number>`.
+            Keep the change minimal and scoped to the reported defect; do not refactor
+            unrelated code.
+
+  # Fallback: if Claude opened the PR but didn't enable auto-merge, do it here.
+  # The coder Action names issue branches `claude/issue-<n>-...`; find that PR and
+  # turn on auto-merge. Idempotent with the prompt instruction above.
+  enable-automerge:
+    needs: implement-fix
+    if: github.event.label.name == 'self-improvement'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Enable auto-merge on the fix PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          pr=$(gh pr list --repo "$REPO" --state open --json number,headRefName \
+                 --jq "[.[] | select(.headRefName | startswith(\"claude/\") and contains(\"issue-$ISSUE\"))][0].number")
+          if [ -n "$pr" ] && [ "$pr" != "null" ]; then
+            echo "Enabling auto-merge on PR #$pr"
+            gh pr merge --auto --squash --repo "$REPO" "$pr" || echo "auto-merge enable failed (may already be set)"
+          else
+            echo "No matching open PR for issue #$ISSUE yet; Claude likely enabled auto-merge itself."
+          fi

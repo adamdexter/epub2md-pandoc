@@ -705,6 +705,43 @@ This script is optimized for uploading books to Claude Projects:
 
 After conversion, simply drag the `.md` files into your Claude Project's knowledge base!
 
+## Self-Improvement Mode (Experimental)
+
+A toggle-able mode that lets the converter **detect and fix its own conversion-quality
+regressions**. When enabled (checkbox on the EPUB tab), after each conversion:
+
+1. An **LLM-as-judge** (`self_improve.py`, Claude via the Anthropic SDK) compares the
+   original EPUB to the produced Markdown and returns structured findings.
+2. Real problems are filed as de-duplicated **GitHub issues** labelled `self-improvement`.
+3. A **Claude Code GitHub Action** (`.github/workflows/self-improve.yml`) implements the
+   fix on a branch, runs the regression suite + ruff, opens a PR, and **auto-merges on
+   green CI**.
+
+It's **off by default** because it consumes API tokens. The regression suite (`tests/`,
+run with `pytest -q`) is the safety gate between an AI fix and `main`, reinforced by a
+baseline-tamper guard, a CI scope-guard, a dedup ledger, per-run/per-day caps, and a
+circuit breaker.
+
+### Setup
+
+```bash
+pip install -e ".[selfimprove]"   # adds the anthropic SDK (judge)
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+To enable the autonomous fixer (the GitHub side):
+
+1. Install the **Claude GitHub App** on the repo (https://github.com/apps/claude).
+2. Add a repo secret **`ANTHROPIC_API_KEY`** (Settings → Secrets → Actions).
+3. Enable **Allow auto-merge** and a **branch-protection rule** on `main` requiring the
+   `test` and `lint` checks.
+
+You can also run the judge manually:
+
+```bash
+python3 self_improve.py /path/to/book.epub "/path/to/output.md" --dry-run
+```
+
 ## License
 
 MIT License - Feel free to modify and use as needed.

@@ -5,18 +5,15 @@ Converts web articles (blog posts, Medium articles, etc.) to AI-optimized Markdo
 Designed for Claude Projects and RAG systems.
 """
 
-import os
+import html
+import json
+import mimetypes
 import re
 import sys
-import json
-import time
-import hashlib
-import mimetypes
-from pathlib import Path
-from typing import Optional, Tuple, Dict, List, Any
 from datetime import datetime
-from urllib.parse import urlparse, urljoin
-import html
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import urljoin, urlparse
 
 from version import __version__ as CONVERTER_VERSION
 
@@ -34,7 +31,7 @@ except ImportError:
     pass
 
 try:
-    import trafilatura
+    import trafilatura  # noqa: F401  (availability probe)
     from trafilatura import extract
     from trafilatura.metadata import extract_metadata
     TRAFILATURA_AVAILABLE = True
@@ -62,12 +59,7 @@ is_medium_url = None
 fetch_medium_with_selenium = None
 
 try:
-    from medium_scraper import (
-        is_medium_url,
-        fetch_medium_with_selenium,
-        MEDIUM_SUPPORT_AVAILABLE,
-        SELENIUM_AVAILABLE
-    )
+    from medium_scraper import MEDIUM_SUPPORT_AVAILABLE, SELENIUM_AVAILABLE, fetch_medium_with_selenium, is_medium_url
 except ImportError:
     # Medium support not available - that's OK, core functionality still works
     SELENIUM_AVAILABLE = False
@@ -93,7 +85,7 @@ DEFAULT_HEADERS = {
 }
 
 
-def check_dependencies() -> Tuple[bool, List[str]]:
+def check_dependencies() -> tuple[bool, list[str]]:
     """Check if required dependencies are installed."""
     missing = []
 
@@ -154,7 +146,7 @@ def _is_gift_link(url: str) -> bool:
     return any(p in params for p in gift_params)
 
 
-def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]]:
+def fetch_url(url: str, timeout: int = 30) -> tuple[Optional[str], Optional[str]]:
     """
     Fetch URL content with proper headers.
 
@@ -172,10 +164,10 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
 
     if is_paywall:
         if is_gift:
-            print(f"      Detected gift/share link from paywalled site", flush=True)
+            print("      Detected gift/share link from paywalled site", flush=True)
         else:
-            print(f"      Warning: This appears to be a paywalled site. Content may be truncated.", flush=True)
-            print(f"      Tip: Use a gift/share link for full article access.", flush=True)
+            print("      Warning: This appears to be a paywalled site. Content may be truncated.", flush=True)
+            print("      Tip: Use a gift/share link for full article access.", flush=True)
 
     try:
         # Use a session to preserve cookies through redirects (important for gift links)
@@ -230,9 +222,9 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
                 'subscribe now',
             ]
             if any(sig in content_lower for sig in truncation_signals):
-                print(f"      Warning: Article appears to be truncated by paywall", flush=True)
+                print("      Warning: Article appears to be truncated by paywall", flush=True)
                 if not is_gift:
-                    print(f"      Tip: Use a gift/share link for full content", flush=True)
+                    print("      Tip: Use a gift/share link for full content", flush=True)
 
         return content, None
 
@@ -248,7 +240,7 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
         return None, f"Request failed: {str(e)}"
 
 
-def extract_json_ld_metadata(html_content: str) -> Dict[str, Any]:
+def extract_json_ld_metadata(html_content: str) -> dict[str, Any]:
     """Extract metadata from JSON-LD structured data."""
     metadata = {}
 
@@ -281,7 +273,7 @@ def extract_json_ld_metadata(html_content: str) -> Dict[str, Any]:
     return metadata
 
 
-def parse_json_ld_item(item: Dict) -> Dict[str, Any]:
+def parse_json_ld_item(item: dict) -> dict[str, Any]:
     """Parse a single JSON-LD item for metadata."""
     metadata = {}
 
@@ -337,7 +329,7 @@ def parse_json_ld_item(item: Dict) -> Dict[str, Any]:
     return metadata
 
 
-def extract_opengraph_metadata(html_content: str) -> Dict[str, Any]:
+def extract_opengraph_metadata(html_content: str) -> dict[str, Any]:
     """Extract metadata from OpenGraph and Twitter meta tags."""
     metadata = {}
 
@@ -398,7 +390,7 @@ def extract_opengraph_metadata(html_content: str) -> Dict[str, Any]:
     return metadata
 
 
-def extract_tags_and_topics(html_content: str) -> List[str]:
+def extract_tags_and_topics(html_content: str) -> list[str]:
     """Extract tags, topics, categories from the article."""
     tags = set()
 
@@ -458,7 +450,7 @@ def extract_tags_and_topics(html_content: str) -> List[str]:
     return sorted(set(cleaned_tags))[:20]  # Limit to 20 tags
 
 
-def extract_table_of_contents(html_content: str) -> List[Dict[str, Any]]:
+def extract_table_of_contents(html_content: str) -> list[dict[str, Any]]:
     """Extract table of contents from headings in the article."""
     toc = []
 
@@ -502,7 +494,7 @@ def extract_table_of_contents(html_content: str) -> List[Dict[str, Any]]:
     return toc
 
 
-def format_toc_for_markdown(toc: List[Dict[str, Any]], title: str = None) -> str:
+def format_toc_for_markdown(toc: list[dict[str, Any]], title: str = None) -> str:
     """Format table of contents as markdown."""
     if not toc:
         return ""
@@ -519,7 +511,7 @@ def format_toc_for_markdown(toc: List[Dict[str, Any]], title: str = None) -> str
     return '\n'.join(lines) + '\n'
 
 
-def extract_toc_from_markdown(markdown_content: str) -> List[Dict[str, Any]]:
+def extract_toc_from_markdown(markdown_content: str) -> list[dict[str, Any]]:
     """
     Extract table of contents from markdown headings.
     This is more reliable than extracting from HTML as it works on the final cleaned content.
@@ -551,7 +543,7 @@ def extract_toc_from_markdown(markdown_content: str) -> List[Dict[str, Any]]:
     return toc
 
 
-def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
+def extract_spa_metadata(html_content: str, url: str) -> dict[str, Any]:
     """
     Extract metadata from modern SPA (Single Page Application) sites.
     Handles sites like Heavybit, Medium, Substack that use React/Vue/etc.
@@ -822,7 +814,7 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
     return metadata
 
 
-def extract_html_metadata(html_content: str, url: str) -> Dict[str, Any]:
+def extract_html_metadata(html_content: str, url: str) -> dict[str, Any]:
     """Extract metadata by parsing HTML structure."""
     metadata = {}
 
@@ -949,7 +941,7 @@ def extract_html_metadata(html_content: str, url: str) -> Dict[str, Any]:
     return metadata
 
 
-def merge_metadata(*metadata_dicts: Dict[str, Any]) -> Dict[str, Any]:
+def merge_metadata(*metadata_dicts: dict[str, Any]) -> dict[str, Any]:
     """Merge multiple metadata dictionaries, preferring earlier sources."""
     merged = {}
 
@@ -1063,7 +1055,7 @@ def preprocess_medium_html(html_content: str) -> str:
         return html_content
 
 
-def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str], Dict[str, Any]]:
+def extract_article_content(html_content: str, url: str) -> tuple[Optional[str], dict[str, Any]]:
     """
     Extract main article content from HTML.
     Uses trafilatura as primary, with readability-lxml and BeautifulSoup as fallbacks.
@@ -1354,7 +1346,7 @@ def html_to_simple_markdown(html_content: str) -> str:
     return text.strip()
 
 
-def extract_images(html_content: str, base_url: str) -> List[Dict[str, str]]:
+def extract_images(html_content: str, base_url: str) -> list[dict[str, str]]:
     """
     Extract image information from HTML content.
     Enhanced for SPA sites with og:image fallback and CDN handling.
@@ -1492,7 +1484,7 @@ def extract_images(html_content: str, base_url: str) -> List[Dict[str, str]]:
     return images
 
 
-def download_image(image_url: str, output_dir: Path, base_name: str, index: int) -> Tuple[Optional[str], Optional[str]]:
+def download_image(image_url: str, output_dir: Path, base_name: str, index: int) -> tuple[Optional[str], Optional[str]]:
     """
     Download an image and save it locally.
 
@@ -1578,7 +1570,7 @@ def sanitize_filename(text: str) -> str:
     return text
 
 
-def create_output_filename(metadata: Dict[str, Any], url: str) -> str:
+def create_output_filename(metadata: dict[str, Any], url: str) -> str:
     """
     Create output filename in format: Author - Title - Source.md
     """
@@ -1649,10 +1641,10 @@ def format_date(date_str: Optional[str]) -> Optional[str]:
 
 
 def generate_yaml_frontmatter(
-    metadata: Dict[str, Any],
+    metadata: dict[str, Any],
     url: str,
     reading_time: int,
-    tags: List[str] = None,
+    tags: list[str] = None,
     has_toc: bool = False
 ) -> str:
     """Generate YAML frontmatter for the markdown file."""
@@ -1867,7 +1859,7 @@ def convert_url_to_markdown(
     output_dir: str,
     download_images: bool = True,
     image_subdir: str = 'article_images'
-) -> Tuple[bool, str, Optional[str]]:
+) -> tuple[bool, str, Optional[str]]:
     """
     Convert a web URL to an AI-optimized Markdown file.
 
@@ -1899,7 +1891,7 @@ def convert_url_to_markdown(
         if MEDIUM_SUPPORT_AVAILABLE:
             medium_selenium_html, selenium_error = fetch_medium_with_selenium(url)
             if medium_selenium_html:
-                print(f"      ✓ Got authenticated content via Selenium")
+                print("      ✓ Got authenticated content via Selenium")
             else:
                 print(f"      Selenium fetch failed: {selenium_error}")
                 print("      Falling back to regular fetch (may be truncated)...")
@@ -1935,7 +1927,7 @@ def convert_url_to_markdown(
                         print(f"      Trafilatura fetch got {len(better_html):,} bytes with better content")
                         html_content = better_html
                     else:
-                        print(f"      Trafilatura fetch didn't improve content")
+                        print("      Trafilatura fetch didn't improve content")
                 else:
                     print("      Trafilatura fetch returned no content")
             except Exception as e:
@@ -2117,7 +2109,7 @@ def convert_url_to_markdown(
 
     file_size = filepath.stat().st_size / 1024
     print(f"\n{'='*60}")
-    print(f"SUCCESS!")
+    print("SUCCESS!")
     print(f"Output: {filepath}")
     print(f"Size: {file_size:.1f} KB")
     print('='*60)
