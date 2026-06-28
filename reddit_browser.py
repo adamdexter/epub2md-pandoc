@@ -72,6 +72,10 @@ async def _fetch_async(url: str, headless: bool) -> tuple[Optional[str], bool]:
     browser = await uc.start(
         user_data_dir=REDDIT_PROFILE_DIR,
         headless=headless,
+        # Disable the Chrome sandbox — required when Chrome won't otherwise
+        # connect (e.g. launched from the packaged app or an elevated context).
+        # Matches medium_scraper, which runs Chrome with --no-sandbox too.
+        sandbox=False,
         browser_args=['--no-first-run', '--no-default-browser-check'],
     )
     try:
