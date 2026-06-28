@@ -17,6 +17,13 @@ All notable changes to epub2md-pandoc are tracked here.
   message points users to it when missing.
 
 ### Fixed
+- **SSL certificate failures no longer masquerade as connectivity errors, and now
+  recover** — sites that ship an incomplete/misconfigured certificate chain (missing
+  intermediate CA) raised `requests.exceptions.SSLError`, which subclasses
+  `ConnectionError` and so was reported as the misleading "Connection error — check
+  your internet connection." The fetcher now retries once without verification (with
+  a clear warning) so such articles still convert, and a genuine SSL failure is
+  reported as an SSL error rather than a network problem.
 - **Copy Logs / on-screen log now include the final outcome** — the web-article
   progress log and its "Copy Logs" button previously omitted the success/error
   banner, so a copied log ended mid-run with no result. The final message is now

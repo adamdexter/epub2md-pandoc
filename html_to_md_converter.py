@@ -283,12 +283,29 @@ def fetch_url(url: str, timeout: int = 30) -> tuple[Optional[str], Optional[str]
             if not is_gift:
                 headers['Referer'] = 'https://www.google.com/'
 
-        response = session.get(
-            url,
-            headers=headers,
-            timeout=timeout,
-            allow_redirects=True
-        )
+        try:
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True
+            )
+        except requests.exceptions.SSLError:
+            # Some sites ship an incomplete/misconfigured certificate chain (missing
+            # intermediate CA). Browsers fetch the missing cert automatically; requests
+            # doesn't. Retry once without verification so the article still converts.
+            print("      Warning: SSL certificate verification failed — the site has an "
+                  "incomplete/misconfigured certificate chain.", flush=True)
+            print("      Retrying without certificate verification...", flush=True)
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True,
+                verify=False
+            )
 
         # For paywalled sites, a 401/403 with a gift link is likely a token issue
         if response.status_code in (401, 403) and is_paywall:
@@ -351,6 +368,10 @@ def fetch_url(url: str, timeout: int = 30) -> tuple[Optional[str], Optional[str]
         status = e.response.status_code if e.response is not None else 'unknown'
         reason = e.response.reason if e.response is not None else str(e)
         return None, f"HTTP error: {status} - {reason}"
+    except requests.exceptions.SSLError as e:
+        # Must precede ConnectionError (SSLError subclasses it), or this reads as a
+        # misleading "check your internet connection".
+        return None, f"SSL certificate error (the site's HTTPS certificate could not be verified): {e}"
     except requests.exceptions.ConnectionError:
         return None, "Connection error - check your internet connection"
     except requests.exceptions.RequestException as e:
