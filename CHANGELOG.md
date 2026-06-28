@@ -5,6 +5,13 @@ All notable changes to epub2md-pandoc are tracked here.
 ## [Unreleased]
 
 ### Added
+- **Reddit posts** — Reddit pages are served behind a JavaScript bot-check
+  ("Please wait for verification"), so the generic HTML extractors only ever
+  saw the interstitial and produced no content. Reddit URLs are now detected
+  and routed through Reddit's public JSON API instead, rendering the post body
+  and (nested) comments to Markdown with author/subreddit/date metadata.
+  Handles self/link/gallery posts and `/s/` share links; surfaces a clear
+  message when Reddit rate-limits the request.
 - **Paginated web articles** — the web-article converter can now follow
   pagination query parameters (`?page=`, `?pg=`, `?paged=`, etc.) and combine
   multiple pages into a single Markdown file:

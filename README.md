@@ -257,6 +257,22 @@ python3 html_to_md_converter.py "https://example.com/article?page=2" --pages 3
 
 Supported pagination parameters: `page`, `paged`, `pagina`, `pg`, `p`.
 
+### Reddit Posts
+
+Reddit's web pages sit behind a JavaScript bot-check, so a normal fetch only
+returns a "Please wait for verification" page with no article content. The
+converter detects Reddit URLs and uses Reddit's public JSON API instead,
+capturing the post body plus its comment thread:
+
+```bash
+python3 html_to_md_converter.py "https://www.reddit.com/r/programming/comments/abc123/some_post/"
+```
+
+Self-posts, link posts, image galleries, and `/s/` share links are all
+supported. Reddit aggressively rate-limits automated access from
+datacenter/VPN IPs — if you see an HTTP 403/429, wait a moment and retry from a
+normal connection.
+
 ### Medium Articles (Authenticated Access)
 
 Medium gates full article content behind a paywall. This converter supports authenticated access to read member-only articles using your Medium account.

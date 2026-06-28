@@ -10,7 +10,7 @@ import json
 import mimetypes
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
@@ -1900,6 +1900,271 @@ def clean_markdown_for_rag(content: str) -> str:
 
 
 
+# ============================================================================
+# Reddit support
+#
+# Reddit's web pages are served behind a JS bot-check ("Please wait for
+# verification"), so the generic HTML extractors only ever see the
+# interstitial. Reddit's public JSON endpoint (append `.json` to a post
+# permalink) returns the post body and comments as structured data, which we
+# render to Markdown directly.
+# ============================================================================
+
+# Reddit's JSON API rejects generic browser User-Agents but accepts a
+# descriptive one identifying the client.
+REDDIT_HEADERS = {
+    'User-Agent': f'epub2md/{CONVERTER_VERSION} (AI-optimized Markdown converter)',
+    'Accept': 'application/json',
+}
+
+
+def is_reddit_url(url: str) -> bool:
+    """Return True if the URL points at reddit.com (or redd.it)."""
+    host = urlparse(url).netloc.lower()
+    return (
+        host == 'reddit.com' or host.endswith('.reddit.com')
+        or host == 'redd.it' or host.endswith('.redd.it')
+    )
+
+
+def _resolve_reddit_permalink(url: str) -> str:
+    """Follow redirects (e.g. /s/ share links) to the canonical comments URL."""
+    if not REQUESTS_AVAILABLE:
+        return url
+    try:
+        resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=20, allow_redirects=True)
+        return resp.url
+    except requests.exceptions.RequestException:
+        return url
+
+
+def fetch_reddit_json(url: str) -> tuple[Optional[Any], Optional[str]]:
+    """
+    Fetch a Reddit post's JSON (post + comments).
+
+    Returns:
+        Tuple of (parsed_json, error_message).
+    """
+    if not REQUESTS_AVAILABLE:
+        return None, "requests library not installed"
+
+    parsed = urlparse(url)
+    # Share links (/r/<sub>/s/<id>) and other shapes redirect to a /comments/ URL.
+    if '/comments/' not in parsed.path:
+        parsed = urlparse(_resolve_reddit_permalink(url))
+        if '/comments/' not in parsed.path:
+            return None, "URL is not a Reddit post/comments page"
+
+    path = parsed.path.rstrip('/')
+    if not path.endswith('.json'):
+        path += '.json'
+    json_url = urlunparse(('https', 'www.reddit.com', path, '', 'raw_json=1', ''))
+
+    try:
+        resp = requests.get(json_url, headers=REDDIT_HEADERS, timeout=30)
+    except requests.exceptions.RequestException as e:
+        return None, f"request failed: {e}"
+
+    if resp.status_code in (403, 429):
+        return None, (
+            f"HTTP {resp.status_code}: Reddit blocked the request. Reddit rate-limits and "
+            "blocks automated access (especially from datacenter/VPN IPs). Wait a minute and "
+            "retry, or run from a residential connection."
+        )
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code} from Reddit's JSON API"
+
+    try:
+        return resp.json(), None
+    except ValueError:
+        return None, "Reddit did not return JSON (likely a bot-check interstitial)"
+
+
+def _render_reddit_comments(children: list, max_comments: int = 40, max_depth: int = 4) -> list[str]:
+    """Render Reddit comment trees as nested-blockquote Markdown blocks."""
+    rendered: list[str] = []
+    count = 0
+
+    def walk(children: list, depth: int) -> None:
+        nonlocal count
+        for child in children or []:
+            if count >= max_comments:
+                return
+            if child.get('kind') != 't1':
+                continue
+            data = child.get('data', {})
+            body = (data.get('body') or '').strip()
+            author = data.get('author') or '[deleted]'
+            score = data.get('score')
+            if body and body not in ('[deleted]', '[removed]'):
+                count += 1
+                prefix = '> ' * (depth + 1)
+                score_str = f" ({score} points)" if isinstance(score, int) else ""
+                quoted = '\n'.join(f"{prefix}{line}" for line in body.split('\n'))
+                rendered.append(f"{prefix}**u/{author}**{score_str}\n{prefix}\n{quoted}")
+            if depth < max_depth:
+                replies = data.get('replies')
+                if isinstance(replies, dict):
+                    walk(replies.get('data', {}).get('children', []), depth + 1)
+
+    walk(children, 0)
+    return rendered
+
+
+def reddit_json_to_markdown(data: Any) -> tuple[Optional[str], dict[str, Any], list[str]]:
+    """
+    Convert parsed Reddit post JSON into (markdown_content, metadata, image_urls).
+
+    Pure function (no network) so it can be unit-tested with fixture data.
+    Returns (None, {}, []) if the JSON isn't a recognizable post listing.
+    """
+    try:
+        post = data[0]['data']['children'][0]['data']
+    except (KeyError, IndexError, TypeError):
+        return None, {}, []
+
+    title = post.get('title', 'Reddit Post')
+    author = post.get('author', '[deleted]')
+    subreddit = post.get('subreddit_name_prefixed', '')
+    score = post.get('score')
+    num_comments = post.get('num_comments')
+    selftext = (post.get('selftext') or '').strip()
+    link_url = post.get('url_overridden_by_dest') or post.get('url') or ''
+    is_self = post.get('is_self', True)
+
+    # Store the bare username for clean filenames/frontmatter; the "u/" prefix
+    # is shown in the rendered body instead.
+    metadata: dict[str, Any] = {
+        'title': title,
+        'author': author,
+        'source_name': 'Reddit',
+    }
+    created = post.get('created_utc')
+    if created:
+        try:
+            metadata['publication_date'] = datetime.fromtimestamp(
+                created, tz=timezone.utc
+            ).strftime('%Y-%m-%d')
+        except (ValueError, OSError, OverflowError):
+            pass
+
+    # ===== Collect image URLs (direct image link + gallery) =====
+    image_urls: list[str] = []
+    is_image_link = bool(re.search(r'\.(jpg|jpeg|png|gif|webp)(\?|$)', link_url, re.I))
+    if is_image_link:
+        image_urls.append(link_url)
+    media_metadata = post.get('media_metadata')
+    if isinstance(media_metadata, dict):
+        for media in media_metadata.values():
+            source = (media or {}).get('s', {})
+            img = source.get('u') or source.get('gif')
+            if img:
+                image_urls.append(html.unescape(img))
+
+    # ===== Build Markdown body =====
+    parts = [f"# {title}", ""]
+    meta_bits = []
+    if subreddit:
+        meta_bits.append(f"Posted in {subreddit}")
+    meta_bits.append(f"by u/{author}")
+    if isinstance(score, int):
+        meta_bits.append(f"{score} points")
+    if isinstance(num_comments, int):
+        meta_bits.append(f"{num_comments} comments")
+    parts.append("*" + " • ".join(meta_bits) + "*")
+    parts.append("")
+
+    if not is_self and link_url and not is_image_link:
+        parts.append(f"**Link:** {link_url}")
+        parts.append("")
+    if selftext:
+        parts.append(selftext)
+        parts.append("")
+
+    comments_children = data[1].get('data', {}).get('children', []) if len(data) > 1 else []
+    rendered_comments = _render_reddit_comments(comments_children)
+    if rendered_comments:
+        parts.append("## Comments")
+        parts.append("")
+        parts.append("\n\n".join(rendered_comments))
+
+    return "\n".join(parts).strip(), metadata, image_urls
+
+
+def convert_reddit_to_markdown(
+    url: str,
+    output_dir: str,
+    download_images: bool = True,
+    image_subdir: str = 'article_images'
+) -> tuple[bool, str, Optional[str]]:
+    """Convert a Reddit post (via the JSON API) to an AI-optimized Markdown file."""
+    print(f"\n{'='*60}")
+    print(f"Converting: {url}")
+    print('='*60)
+    print("\n[Reddit Detected] Using Reddit's JSON API...")
+
+    data, error = fetch_reddit_json(url)
+    if error:
+        return False, f"Failed to fetch Reddit content: {error}", None
+
+    content, metadata, image_urls = reddit_json_to_markdown(data)
+    if not content:
+        return False, "Could not parse Reddit post JSON", None
+
+    print(f"      Title: {metadata.get('title', 'Not found')}")
+    print(f"      Author: {metadata.get('author', 'Not found')}")
+    print(f"      Extracted {len(content):,} characters")
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # ===== Images =====
+    if download_images and image_urls:
+        print(f"\n[Images] Downloading {len(image_urls)} image(s)...")
+        article_slug = sanitize_filename(metadata.get('title', 'reddit')[:50])
+        article_image_dir = f"{image_subdir}/{article_slug}"
+        image_dir = output_path / article_image_dir
+        image_dir.mkdir(parents=True, exist_ok=True)
+        base_name = sanitize_filename(f"{metadata.get('author', 'Reddit')} - {metadata.get('title', 'Post')[:40]} - Reddit")
+        downloaded = 0
+        for idx, img_url in enumerate(image_urls, 1):
+            local_name, _err = download_image(img_url, image_dir, base_name, idx)
+            if local_name:
+                downloaded += 1
+                new_ref = f"{article_image_dir}/{local_name}"
+                if img_url in content:
+                    content = content.replace(img_url, new_ref)
+                else:
+                    content += f"\n\n![Figure {idx}]({new_ref})\n"
+        print(f"      Downloaded {downloaded}/{len(image_urls)} image(s)")
+
+    # ===== Clean, frontmatter, TOC, write (mirrors the generic path) =====
+    content = clean_markdown_for_rag(content)
+    reading_time = calculate_reading_time(content)
+
+    toc = extract_toc_from_markdown(content)
+    has_toc = len(toc) >= 3
+    frontmatter = generate_yaml_frontmatter(metadata, url, reading_time, None, has_toc)
+
+    content_parts = [frontmatter, ""]
+    if has_toc:
+        content_parts.append(format_toc_for_markdown(toc, metadata.get('title')))
+        content_parts.append("")
+    content_parts.append(content)
+    final_content = "\n".join(content_parts)
+
+    filename = create_output_filename(metadata, url)
+    filepath = output_path / filename
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(final_content)
+
+    print(f"\n{'='*60}")
+    print("SUCCESS!")
+    print(f"Output: {filepath}")
+    print('='*60)
+    return True, f"Successfully converted to: {filename}", str(filepath)
+
+
 def convert_url_to_markdown(
     url: str,
     output_dir: str,
@@ -1923,6 +2188,11 @@ def convert_url_to_markdown(
     Returns:
         Tuple of (success, message, output_filepath)
     """
+    # Reddit pages are served behind a JS bot-check, so route them through
+    # Reddit's JSON API instead of the generic HTML extractors.
+    if is_reddit_url(url):
+        return convert_reddit_to_markdown(url, output_dir, download_images, image_subdir)
+
     # Check dependencies
     deps_ok, missing = check_dependencies()
     if not deps_ok:
