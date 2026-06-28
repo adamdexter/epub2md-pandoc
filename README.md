@@ -269,9 +269,22 @@ python3 html_to_md_converter.py "https://www.reddit.com/r/programming/comments/a
 ```
 
 Self-posts, link posts, image galleries, and `/s/` share links are all
-supported. Reddit aggressively rate-limits automated access from
-datacenter/VPN IPs — if you see an HTTP 403/429, wait a moment and retry from a
-normal connection.
+supported.
+
+**If Reddit blocks the request (HTTP 403/429):** since Reddit's 2023 API
+lockdown, the plain JSON endpoint is often refused for non-browser requests.
+Install the optional real-browser fallback:
+
+```bash
+pip install nodriver        # or:  pip install -e ".[reddit]"
+```
+
+With `nodriver` available, a blocked fetch automatically falls back to a real
+Chrome that passes Reddit's "Please wait for verification" gate, then reads the
+post in that verified session. A browser window opens on the first run (it uses
+a dedicated, persistent profile in `.reddit_chrome_profile/`, so later runs are
+faster). This is the same real-browser technique used for Medium. Disabling any
+VPN also helps, since datacenter/VPN IPs are blocked hardest.
 
 ### Medium Articles (Authenticated Access)
 

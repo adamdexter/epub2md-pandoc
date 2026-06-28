@@ -148,9 +148,59 @@ def test_convert_reddit_fetch_error(tmp_path, monkeypatch):
     import html_to_md_converter as h
 
     monkeypatch.setattr(h, "fetch_reddit_json", lambda url: (None, "HTTP 403: blocked"))
+    monkeypatch.setattr(h, "REDDIT_BROWSER_AVAILABLE", False)
     ok, msg, fp = convert_reddit_to_markdown(
         "https://www.reddit.com/r/x/comments/abc/", str(tmp_path), download_images=False
     )
     assert not ok
     assert fp is None
     assert "403" in msg
+
+
+URL = "https://www.reddit.com/r/gardening/comments/1dyp6cf/scale/"
+
+
+def test_blocked_without_browser_suggests_nodriver(tmp_path, monkeypatch):
+    import html_to_md_converter as h
+
+    monkeypatch.setattr(h, "fetch_reddit_json", lambda url: (None, "HTTP 403: Reddit blocked"))
+    monkeypatch.setattr(h, "REDDIT_BROWSER_AVAILABLE", False)
+    ok, msg, fp = convert_reddit_to_markdown(URL, str(tmp_path), download_images=False)
+    assert not ok and fp is None
+    assert "pip install nodriver" in msg
+
+
+def test_blocked_with_browser_fallback_succeeds(tmp_path, monkeypatch):
+    import html_to_md_converter as h
+
+    monkeypatch.setattr(h, "fetch_reddit_json", lambda url: (None, "HTTP 403: blocked"))
+    monkeypatch.setattr(h, "REDDIT_BROWSER_AVAILABLE", True)
+    monkeypatch.setattr(h, "fetch_reddit_json_via_browser", lambda url: (_sample_post(), None))
+    ok, msg, fp = convert_reddit_to_markdown(URL, str(tmp_path), download_images=False)
+    assert ok, msg
+    assert fp.endswith("alice - Why plain text wins - Reddit.md")
+
+
+def test_blocked_with_browser_fallback_also_fails(tmp_path, monkeypatch):
+    import html_to_md_converter as h
+
+    monkeypatch.setattr(h, "fetch_reddit_json", lambda url: (None, "HTTP 403: blocked"))
+    monkeypatch.setattr(h, "REDDIT_BROWSER_AVAILABLE", True)
+    monkeypatch.setattr(h, "fetch_reddit_json_via_browser", lambda url: (None, "did not clear"))
+    ok, msg, fp = convert_reddit_to_markdown(URL, str(tmp_path), download_images=False)
+    assert not ok and fp is None
+    assert "Browser fallback" in msg
+
+
+def test_structural_error_skips_browser(tmp_path, monkeypatch):
+    import html_to_md_converter as h
+
+    calls = []
+    monkeypatch.setattr(h, "fetch_reddit_json", lambda url: (None, "URL is not a Reddit post/comments page"))
+    monkeypatch.setattr(h, "REDDIT_BROWSER_AVAILABLE", True)
+    monkeypatch.setattr(
+        h, "fetch_reddit_json_via_browser", lambda url: calls.append(url) or (None, "x")
+    )
+    ok, msg, fp = convert_reddit_to_markdown(URL, str(tmp_path), download_images=False)
+    assert not ok and fp is None
+    assert not calls  # browser must NOT be attempted for a structural error

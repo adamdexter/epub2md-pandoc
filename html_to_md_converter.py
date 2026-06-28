@@ -74,6 +74,19 @@ except ImportError:
         return None, "Medium support not installed. Run: pip install selenium webdriver-manager undetected-chromedriver"
 
 
+# ============================================================================
+# OPTIONAL: Reddit real-browser fallback (via nodriver)
+# Used only when Reddit blocks the plain JSON fetch; the base app runs without it.
+# ============================================================================
+REDDIT_BROWSER_AVAILABLE = False
+fetch_reddit_json_via_browser = None
+
+try:
+    from reddit_browser import REDDIT_BROWSER_AVAILABLE, fetch_reddit_json_via_browser
+except ImportError:
+    pass
+
+
 def _supported_accept_encoding() -> str:
     """
     Build an Accept-Encoding value listing only the compressions we can decode.
@@ -2175,7 +2188,26 @@ def convert_reddit_to_markdown(
 
     data, error = fetch_reddit_json(url)
     if error:
-        return False, f"Failed to fetch Reddit content: {error}", None
+        # The plain JSON fetch is frequently blocked by Reddit's bot-check. Fall
+        # back to a real browser (nodriver) that can pass the verification gate.
+        # Skip the fallback for structural errors a browser can't fix.
+        structural = 'not a Reddit post' in error or 'requests library' in error
+        if REDDIT_BROWSER_AVAILABLE and not structural:
+            print(f"      Direct fetch blocked ({error.split(':')[0]}). Trying real browser...")
+            data, browser_error = fetch_reddit_json_via_browser(url)
+            if browser_error:
+                return False, (
+                    f"Failed to fetch Reddit content. Direct: {error} | "
+                    f"Browser fallback: {browser_error}"
+                ), None
+        elif not REDDIT_BROWSER_AVAILABLE and not structural:
+            return False, (
+                f"Failed to fetch Reddit content: {error} "
+                "Tip: install the real-browser fallback with `pip install nodriver` "
+                "to get past Reddit's verification."
+            ), None
+        else:
+            return False, f"Failed to fetch Reddit content: {error}", None
 
     content, metadata, image_urls = reddit_json_to_markdown(data)
     if not content:

@@ -50,6 +50,11 @@ medium = [
 ocr = [
     "pytesseract>=0.3.10",
 ]
+reddit = [
+    # Real-browser fallback to get past Reddit's "Please wait for verification"
+    # bot-check. nodriver is the modern successor to undetected-chromedriver.
+    "nodriver>=0.32",
+]
 selfimprove = [
     "anthropic>=0.69",
 ]
@@ -58,7 +63,7 @@ dev = [
     "anthropic>=0.69",
 ]
 all = [
-    "epub2md[medium,ocr,selfimprove]",
+    "epub2md[medium,ocr,reddit,selfimprove]",
 ]
 
 [project.urls]

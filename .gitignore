@@ -24,6 +24,9 @@ epub2md*.app/
 .medium_cookies/
 .medium_chrome_profile/
 
+# Reddit real-browser fallback profile (nodriver) - never commit
+.reddit_chrome_profile/
+
 # Conversion output directories
 md processed books/
 converted_articles/

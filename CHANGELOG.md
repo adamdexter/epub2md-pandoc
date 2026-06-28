@@ -4,6 +4,18 @@ All notable changes to epub2md-pandoc are tracked here.
 
 ## [Unreleased]
 
+### Added
+- **Reddit real-browser fallback (`reddit_browser.py`, optional)** — Reddit's
+  post-2023 lockdown blocks the plain JSON endpoint for non-browser requests, so
+  Reddit conversions often failed with HTTP 403. When the direct fetch is blocked
+  and `nodriver` is installed, the converter now falls back to a real Chrome that
+  passes Reddit's "Please wait for verification" gate, then does an in-page
+  `fetch()` of the `.json` in that verified session (reusing the existing parser).
+  Uses a dedicated persistent profile (`.reddit_chrome_profile/`); same technique
+  as the Medium path. Install with `pip install nodriver` or `pip install -e
+  ".[reddit]"`. The base app runs without it (feature-flagged), and the error
+  message points users to it when missing.
+
 ### Fixed
 - **Copy Logs / on-screen log now include the final outcome** — the web-article
   progress log and its "Copy Logs" button previously omitted the success/error

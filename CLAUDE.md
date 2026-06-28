@@ -14,12 +14,13 @@ The repo dir is named `epub2md-pandoc`; the product/package name is `epub2md`. T
 - `pdf_to_md_converter.py` — PDF→MD (pdf2md). Analysis-first routing, native + scanned (OCR) PDFs, table extraction. Entry: `convert_pdf_to_markdown()`, `main()`.
 - `html_to_md_converter.py` — web article→MD. URL fetch, content extraction, image download. Entry: `main()`.
 - `medium_scraper.py` — optional Medium auth/scraping via Selenium + undetected-chromedriver. Feature-flagged behind try/except import (`MEDIUM_SUPPORT_AVAILABLE`); core works without it.
+- `reddit_browser.py` — optional Reddit real-browser fallback via **nodriver** (modern successor to undetected-chromedriver). Used only when the plain JSON fetch is blocked by Reddit's "Please wait for verification" bot-check: a real Chrome with a persistent profile (`.reddit_chrome_profile`) passes the gate, then an in-page `fetch()` of the `.json` feeds the existing `reddit_json_to_markdown()` parser. Feature-flagged behind try/except import (`REDDIT_BROWSER_AVAILABLE`); core works without it.
 - `gui.py` — Flask web GUI. Imports the converters; serves `templates/index.html`. Entry: `main()`.
 - `self_improve.py` — **self-improvement mode** (experimental, opt-in). LLM-as-judge (Anthropic SDK, lazy-imported) comparing an EPUB to its Markdown, filing de-duplicated GitHub issues; dedup ledger / caps / circuit-breaker in `~/.epub2md_eval_history.json`. Entry: `evaluate_conversion()`, CLI `python self_improve.py <epub> <md> --dry-run`.
 - `epub_text.py` — spine-aware plain-text extraction from EPUBs (reference text for the judge).
 - `version.py` — **single source of truth** for the version (`__version__`). pyproject reads it dynamically; `gui.py` and the HTML header read it at runtime. Bump here only.
 
-Dependency graph: `gui.py → {epub, pdf, html}`, and `html → medium_scraper (optional)`.
+Dependency graph: `gui.py → {epub, pdf, html}`, and `html → {medium_scraper, reddit_browser} (both optional)`.
 
 ## Run & develop
 
@@ -63,4 +64,4 @@ Toggle in the EPUB tab. When on, after each conversion `self_improve.py` judges 
 
 ## Gitignored runtime state
 
-`.venv/`, `.medium_cookies/`, `.medium_chrome_profile/`, and generated `md processed books/` output folders. Never commit session cookies or the Chrome profile. The self-improvement eval history/ledger lives at `~/.epub2md_eval_history.json` (home dir, not the repo).
+`.venv/`, `.medium_cookies/`, `.medium_chrome_profile/`, `.reddit_chrome_profile/` (nodriver's Reddit profile), and generated `md processed books/` output folders. Never commit session cookies or the Chrome profiles. The self-improvement eval history/ledger lives at `~/.epub2md_eval_history.json` (home dir, not the repo).
