@@ -1968,12 +1968,17 @@ def clean_markdown_for_rag(content: str) -> str:
 # render to Markdown directly.
 # ============================================================================
 
-# Reddit's JSON API rejects generic browser User-Agents but accepts a
-# descriptive one identifying the client.
+# Reddit aggressively bot-blocks. A full browser-like header set gets past the
+# block more often than a minimal one; a descriptive token is appended to the
+# UA per Reddit's API etiquette.
 REDDIT_HEADERS = {
-    'User-Agent': f'epub2md/{CONVERTER_VERSION} (AI-optimized Markdown converter)',
-    'Accept': 'application/json',
+    **DEFAULT_HEADERS,
+    'User-Agent': DEFAULT_HEADERS['User-Agent'] + f' epub2md/{CONVERTER_VERSION}',
+    'Accept': 'application/json, text/plain, */*',
 }
+
+# Hosts to try, in order. old.reddit.com is often less aggressively guarded.
+REDDIT_JSON_HOSTS = ['www.reddit.com', 'old.reddit.com']
 
 
 def is_reddit_url(url: str) -> bool:
@@ -2016,26 +2021,33 @@ def fetch_reddit_json(url: str) -> tuple[Optional[Any], Optional[str]]:
     path = parsed.path.rstrip('/')
     if not path.endswith('.json'):
         path += '.json'
-    json_url = urlunparse(('https', 'www.reddit.com', path, '', 'raw_json=1', ''))
 
-    try:
-        resp = requests.get(json_url, headers=REDDIT_HEADERS, timeout=30)
-    except requests.exceptions.RequestException as e:
-        return None, f"request failed: {e}"
+    # A shared session lets cookies set on the first hit carry into later tries.
+    session = requests.Session()
+    last_status = None
+    for host in REDDIT_JSON_HOSTS:
+        json_url = urlunparse(('https', host, path, '', 'raw_json=1', ''))
+        try:
+            resp = session.get(json_url, headers=REDDIT_HEADERS, timeout=30)
+        except requests.exceptions.RequestException as e:
+            last_status = str(e)
+            continue
 
-    if resp.status_code in (403, 429):
-        return None, (
-            f"HTTP {resp.status_code}: Reddit blocked the request. Reddit rate-limits and "
-            "blocks automated access (especially from datacenter/VPN IPs). Wait a minute and "
-            "retry, or run from a residential connection."
-        )
-    if resp.status_code != 200:
-        return None, f"HTTP {resp.status_code} from Reddit's JSON API"
+        last_status = resp.status_code
+        if resp.status_code == 200:
+            try:
+                return resp.json(), None
+            except ValueError:
+                # Got HTML (bot-check interstitial) instead of JSON — try next host.
+                continue
+        # 403/429/5xx → try the next host.
 
-    try:
-        return resp.json(), None
-    except ValueError:
-        return None, "Reddit did not return JSON (likely a bot-check interstitial)"
+    return None, (
+        f"HTTP {last_status}: Reddit blocked the request. Since their 2023 API lockdown, "
+        "Reddit blocks unauthenticated/automated access — this often fails even from "
+        "residential IPs, and always from datacenter/VPN IPs. Try disabling any VPN and "
+        "retrying; if it still fails, Reddit is refusing non-browser requests for this post."
+    )
 
 
 def _render_reddit_comments(children: list, max_comments: int = 40, max_depth: int = 4) -> list[str]:

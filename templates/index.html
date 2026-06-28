@@ -1648,7 +1648,10 @@
         // Copy URL logs
         async function copyUrlLogs() {
             const logContainer = document.getElementById('url-progress-log');
-            const logText = logContainer.innerText;
+            const resultContainer = document.getElementById('url-result-message');
+            // Include the final success/error banner, not just the progress lines.
+            const resultText = resultContainer ? resultContainer.innerText.trim() : '';
+            const logText = logContainer.innerText + (resultText ? '\n\n' + resultText : '');
 
             try {
                 await navigator.clipboard.writeText(logText);

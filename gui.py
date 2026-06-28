@@ -798,6 +798,13 @@ def convert_url():
             # Restore stdout
             sys.stdout = old_stdout
 
+            # Mirror the final outcome into the progress log so it shows up
+            # inline (and in Copy Logs), not just in the result banner.
+            if success:
+                url_conversion_status['progress'].append(f"✓ {message}")
+            else:
+                url_conversion_status['progress'].append(f"✗ Error: {message}")
+
             url_conversion_status['success'] = success
             url_conversion_status['output_file'] = output_path
             if not success:

@@ -5,6 +5,15 @@ All notable changes to epub2md-pandoc are tracked here.
 ## [Unreleased]
 
 ### Fixed
+- **Copy Logs / on-screen log now include the final outcome** — the web-article
+  progress log and its "Copy Logs" button previously omitted the success/error
+  banner, so a copied log ended mid-run with no result. The final message is now
+  appended to the progress log and included when copying.
+- **Reddit fetch is more resilient** — tries `old.reddit.com` as well as
+  `www.reddit.com`, uses a full browser-like header set + shared session, and
+  returns a clearer, accurate error when Reddit blocks the request. (Reddit's
+  post-2023 API lockdown still blocks unauthenticated access in many cases; see
+  Known limitations.)
 - **Garbled output / failed extraction on brotli-serving sites** — the web-article
   fetcher advertised `Accept-Encoding: ...br` but couldn't decode brotli unless the
   optional `brotli` package was installed. Affected servers (e.g. domyown.com) then
