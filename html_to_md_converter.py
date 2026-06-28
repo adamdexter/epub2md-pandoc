@@ -6,6 +6,7 @@ Designed for Claude Projects and RAG systems.
 """
 
 import html
+import importlib.util
 import json
 import mimetypes
 import re
@@ -73,16 +74,57 @@ except ImportError:
         return None, "Medium support not installed. Run: pip install selenium webdriver-manager undetected-chromedriver"
 
 
+def _supported_accept_encoding() -> str:
+    """
+    Build an Accept-Encoding value listing only the compressions we can decode.
+
+    requests/urllib3 decode gzip and deflate out of the box, but brotli (``br``)
+    and zstd require optional packages. Advertising ``br`` without the decoder
+    makes servers return brotli-compressed bytes that requests can't unpack,
+    which then get mis-decoded into garbage. So only claim what we can handle.
+    """
+    encodings = ['gzip', 'deflate']
+    if importlib.util.find_spec('brotli') or importlib.util.find_spec('brotlicffi'):
+        encodings.append('br')
+    if importlib.util.find_spec('zstandard'):
+        encodings.append('zstd')
+    return ', '.join(encodings)
+
+
 # Default headers to mimic a real browser
 DEFAULT_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
+    'Accept-Encoding': _supported_accept_encoding(),
     'DNT': '1',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
 }
+
+
+def _manual_decompress(data: bytes, encoding: str) -> Optional[bytes]:
+    """
+    Decompress a brotli/zstd response body when requests couldn't.
+
+    Returns the decompressed bytes, or None if the required decoder isn't
+    installed or decompression fails.
+    """
+    encoding = encoding.lower()
+    try:
+        if 'br' in encoding:
+            try:
+                import brotli
+                return brotli.decompress(data)
+            except ImportError:
+                import brotlicffi
+                return brotlicffi.decompress(data)
+        if 'zstd' in encoding:
+            import zstandard
+            return zstandard.ZstdDecompressor().decompress(data)
+    except Exception:
+        return None
+    return None
 
 
 def check_dependencies() -> tuple[bool, list[str]]:
@@ -250,11 +292,27 @@ def fetch_url(url: str, timeout: int = 30) -> tuple[Optional[str], Optional[str]
 
         response.raise_for_status()
 
-        # Try to detect encoding
-        response.encoding = response.apparent_encoding or 'utf-8'
+        # Defensive: if the server ignored our Accept-Encoding and sent a
+        # compression requests can't unpack (brotli/zstd without the optional
+        # decoder), the bytes stay compressed and the Content-Encoding header
+        # lingers. Decode it ourselves if possible, else fail clearly instead
+        # of emitting mis-decoded garbage.
+        leftover_enc = response.headers.get('Content-Encoding', '').lower()
+        if 'br' in leftover_enc or 'zstd' in leftover_enc:
+            decoded = _manual_decompress(response.content, leftover_enc)
+            if decoded is None:
+                pkg = 'brotli' if 'br' in leftover_enc else 'zstandard'
+                return None, (
+                    f"Server returned {leftover_enc}-compressed content that could not be "
+                    f"decoded. Install the optional decoder with: pip install {pkg}"
+                )
+            content = sanitize_html(decoded.decode('utf-8', errors='replace'))
+        else:
+            # Try to detect encoding
+            response.encoding = response.apparent_encoding or 'utf-8'
 
-        # Sanitize HTML to remove control characters
-        content = sanitize_html(response.text)
+            # Sanitize HTML to remove control characters
+            content = sanitize_html(response.text)
 
         # Check if paywalled content was truncated
         if is_paywall and content:

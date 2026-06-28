@@ -4,6 +4,17 @@ All notable changes to epub2md-pandoc are tracked here.
 
 ## [Unreleased]
 
+### Fixed
+- **Garbled output / failed extraction on brotli-serving sites** — the web-article
+  fetcher advertised `Accept-Encoding: ...br` but couldn't decode brotli unless the
+  optional `brotli` package was installed. Affected servers (e.g. domyown.com) then
+  returned brotli-compressed bytes that got mis-decoded into binary garbage, so every
+  extractor failed and the converter produced empty/incorrect output (this also made
+  multi-page captures look broken). The fetcher now advertises only the compressions
+  it can actually decode (detected at runtime), decodes a stray brotli/zstd response
+  itself when possible, and otherwise fails with a clear "install the decoder" message.
+  `brotli` is now a declared dependency for native decoding.
+
 ### Added
 - **Reddit posts** — Reddit pages are served behind a JavaScript bot-check
   ("Please wait for verification"), so the generic HTML extractors only ever

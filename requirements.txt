@@ -9,6 +9,7 @@ pywebview>=5.0
 
 # Web Article Conversion (html_to_md_converter.py)
 requests>=2.28.0
+brotli>=1.0.9  # decode brotli-compressed responses (many CDNs use Content-Encoding: br)
 trafilatura>=1.6.0
 beautifulsoup4>=4.11.0
 
