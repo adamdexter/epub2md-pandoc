@@ -683,6 +683,14 @@
                         <div class="help-text">Enter the URL of a blog post, news article, or web page to convert</div>
                     </div>
 
+                    <div class="form-group" id="url-pagination-group" style="display: none;">
+                        <label for="url-page-count">Pages to capture</label>
+                        <input type="number" id="url-page-count" min="1" value="1" style="max-width: 120px;">
+                        <div class="help-text" id="url-pagination-help">
+                            This URL looks paginated. Enter how many pages to capture, starting from this one.
+                        </div>
+                    </div>
+
                     <div class="form-group">
                         <label for="url-output-folder">Output Folder</label>
                         <div class="folder-input-group">
@@ -1484,12 +1492,54 @@
         // ========== URL Conversion Handlers ==========
 
         // Handle URL form submission
+        // Detect a pagination parameter in the article URL and reveal the
+        // "Pages to capture" field. Mirrors PAGINATION_PARAMS in the backend.
+        const PAGINATION_PARAMS = ['page', 'paged', 'pagina', 'pg', 'p'];
+        function detectPagination(rawUrl) {
+            try {
+                const u = new URL(rawUrl);
+                for (const param of PAGINATION_PARAMS) {
+                    const val = u.searchParams.get(param);
+                    if (val !== null && /^\d+$/.test(val)) {
+                        return { param: param, page: parseInt(val, 10) };
+                    }
+                }
+            } catch (e) {
+                // Not a valid/complete URL yet — ignore.
+            }
+            return null;
+        }
+
+        function updatePaginationField() {
+            const url = document.getElementById('article-url').value.trim();
+            const group = document.getElementById('url-pagination-group');
+            const help = document.getElementById('url-pagination-help');
+            const detected = detectPagination(url);
+            if (detected) {
+                group.style.display = '';
+                help.textContent =
+                    `This URL is paginated (?${detected.param}=${detected.page}). ` +
+                    `Enter how many pages to capture, starting from page ${detected.page}.`;
+            } else {
+                group.style.display = 'none';
+            }
+        }
+
+        document.getElementById('article-url').addEventListener('input', updatePaginationField);
+
         document.getElementById('url-converter-form').addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const url = document.getElementById('article-url').value.trim();
             const outputFolder = document.getElementById('url-output-folder').value;
             const downloadImages = document.getElementById('download-images').checked;
+
+            // Only send a page count if the URL looks paginated and the field is visible
+            let pageCount = 1;
+            if (document.getElementById('url-pagination-group').style.display !== 'none') {
+                pageCount = parseInt(document.getElementById('url-page-count').value, 10) || 1;
+                if (pageCount < 1) pageCount = 1;
+            }
 
             if (!url) {
                 alert('Please enter a URL');
@@ -1517,7 +1567,8 @@
                     body: JSON.stringify({
                         url: url,
                         output_folder: outputFolder,
-                        download_images: downloadImages
+                        download_images: downloadImages,
+                        page_count: pageCount
                     })
                 });
 

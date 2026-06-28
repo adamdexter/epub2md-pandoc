@@ -757,6 +757,10 @@ def convert_url():
     url = data.get('url', '').strip()
     output_folder = data.get('output_folder', 'converted_articles')
     download_images = data.get('download_images', True)
+    try:
+        page_count = max(1, int(data.get('page_count', 1)))
+    except (TypeError, ValueError):
+        page_count = 1
 
     if not url:
         return jsonify({'error': 'URL is required'}), 400
@@ -787,7 +791,8 @@ def convert_url():
             success, message, output_path = convert_url_to_markdown(
                 url=url,
                 output_dir=output_folder,
-                download_images=download_images
+                download_images=download_images,
+                page_count=page_count
             )
 
             # Restore stdout

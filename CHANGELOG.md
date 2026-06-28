@@ -2,6 +2,20 @@
 
 All notable changes to epub2md-pandoc are tracked here.
 
+## [Unreleased]
+
+### Added
+- **Paginated web articles** — the web-article converter can now follow
+  pagination query parameters (`?page=`, `?pg=`, `?paged=`, etc.) and combine
+  multiple pages into a single Markdown file:
+  - When a URL with a pagination parameter is detected, the GUI reveals a
+    "Pages to capture" field and the CLI prompts for a page count.
+  - Capture starts from the page number in the URL and increments. For example,
+    a URL ending in `?page=2` with a count of `3` captures pages 2, 3, and 4.
+  - New `--pages N` flag on `html_to_md_converter.py` for non-interactive use;
+    `convert_url_to_markdown()` gains a `page_count` parameter. Images on later
+    pages are also captured and de-duplicated.
+
 ## [3.2.0] - 2026-06-19
 
 ### Added

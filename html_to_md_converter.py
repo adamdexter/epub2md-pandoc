@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from version import __version__ as CONVERTER_VERSION
 
@@ -99,6 +99,52 @@ def check_dependencies() -> tuple[bool, list[str]]:
     # readability-lxml is optional (fallback)
 
     return len(missing) == 0, missing
+
+
+# Query parameters commonly used for pagination, in priority order.
+# 'p' is last because it's the most ambiguous (can mean other things).
+PAGINATION_PARAMS = ['page', 'paged', 'pagina', 'pg', 'p']
+
+
+def detect_pagination_param(url: str) -> Optional[tuple[str, int]]:
+    """
+    Detect a pagination query parameter in a URL.
+
+    Looks for common pagination params (?page=, ?pg=, etc.) whose value is a
+    plain integer.
+
+    Returns:
+        (param_name, current_page_number) if found, else None.
+    """
+    parsed = urlparse(url)
+    if not parsed.query:
+        return None
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for param in PAGINATION_PARAMS:
+        value = query.get(param)
+        if value is not None and value.isdigit():
+            return param, int(value)
+    return None
+
+
+def build_page_url(url: str, param: str, page_number: int) -> str:
+    """
+    Return ``url`` with the pagination ``param`` set to ``page_number``,
+    preserving all other query parameters and their order.
+    """
+    parsed = urlparse(url)
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    new_pairs = []
+    replaced = False
+    for key, value in pairs:
+        if key == param:
+            new_pairs.append((key, str(page_number)))
+            replaced = True
+        else:
+            new_pairs.append((key, value))
+    if not replaced:
+        new_pairs.append((param, str(page_number)))
+    return urlunparse(parsed._replace(query=urlencode(new_pairs)))
 
 
 def sanitize_html(html_content: str) -> str:
@@ -1858,7 +1904,8 @@ def convert_url_to_markdown(
     url: str,
     output_dir: str,
     download_images: bool = True,
-    image_subdir: str = 'article_images'
+    image_subdir: str = 'article_images',
+    page_count: int = 1
 ) -> tuple[bool, str, Optional[str]]:
     """
     Convert a web URL to an AI-optimized Markdown file.
@@ -1868,6 +1915,10 @@ def convert_url_to_markdown(
         output_dir: Directory to save the output file
         download_images: Whether to download images
         image_subdir: Subdirectory name for images
+        page_count: Number of paginated pages to capture, starting from the
+            page number in the URL. When > 1 and the URL contains a pagination
+            parameter (e.g. ?page=2), the converter fetches that page and the
+            following ``page_count - 1`` pages, combining them into one file.
 
     Returns:
         Tuple of (success, message, output_filepath)
@@ -1995,13 +2046,48 @@ def convert_url_to_markdown(
 
     print(f"      Extracted {len(content):,} characters")
 
+    # ===== MULTI-PAGE / PAGINATION HANDLING =====
+    # Keep every page's HTML so images on later pages are also captured below.
+    page_htmls = [html_content]
+    if page_count and page_count > 1:
+        pagination = detect_pagination_param(url)
+        if pagination:
+            param, start_page = pagination
+            end_page = start_page + page_count - 1
+            print(f"\n[Pagination] Capturing {page_count} pages "
+                  f"(?{param}={start_page} … ?{param}={end_page})")
+            for page_num in range(start_page + 1, end_page + 1):
+                page_url = build_page_url(url, param, page_num)
+                print(f"      Fetching page {page_num}: {page_url}")
+                page_html, page_err = fetch_url(page_url)
+                if page_err or not page_html:
+                    print(f"      Warning: failed to fetch page {page_num}: {page_err}")
+                    continue
+                page_content, _ = extract_article_content(page_html, page_url)
+                if not page_content:
+                    print(f"      Warning: no article content found on page {page_num}")
+                    continue
+                page_htmls.append(page_html)
+                content += f"\n\n---\n\n{page_content}"
+                print(f"      Page {page_num}: added {len(page_content):,} characters")
+        else:
+            print("      Note: no pagination parameter found in URL; "
+                  "capturing single page only")
+
     # Step 4: Handle images
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     if download_images:
         print("\n[4/6] Processing images...")
-        all_images = extract_images(html_content, url)
+        # Gather images from every captured page, de-duplicating by URL.
+        all_images = []
+        seen_image_urls = set()
+        for page_html in page_htmls:
+            for img in extract_images(page_html, url):
+                if img['url'] not in seen_image_urls:
+                    seen_image_urls.add(img['url'])
+                    all_images.append(img)
 
         # Filter out obvious non-article images (tiny icons, tracking pixels, avatars)
         # but be inclusive — trafilatura strips image URLs from extracted text,
@@ -2139,14 +2225,38 @@ Examples:
                         help='Skip downloading images')
     parser.add_argument('--image-dir', default='article_images',
                         help='Subdirectory for images (default: article_images)')
+    parser.add_argument('--pages', type=int, default=None,
+                        help='Number of paginated pages to capture, starting from the '
+                             'page number in the URL (e.g. a URL ending in ?page=2 with '
+                             '--pages 3 captures pages 2, 3, and 4). When omitted and a '
+                             'pagination parameter is detected, you will be prompted.')
 
     args = parser.parse_args()
+
+    # Resolve how many pages to capture.
+    page_count = args.pages
+    if page_count is None:
+        pagination = detect_pagination_param(args.url)
+        if pagination and sys.stdin.isatty():
+            param, start_page = pagination
+            print(f"\nDetected pagination parameter '?{param}={start_page}' in the URL.")
+            try:
+                resp = input(
+                    f"How many pages to capture starting from page {start_page}? [1]: "
+                ).strip()
+                page_count = int(resp) if resp else 1
+            except (ValueError, EOFError):
+                page_count = 1
+        else:
+            page_count = 1
+    page_count = max(1, page_count)
 
     success, message, filepath = convert_url_to_markdown(
         url=args.url,
         output_dir=args.output,
         download_images=not args.no_images,
-        image_subdir=args.image_dir
+        image_subdir=args.image_dir,
+        page_count=page_count
     )
 
     if success:

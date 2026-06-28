@@ -237,6 +237,26 @@ Convert web articles (blog posts, news articles, Medium posts) to Markdown.
 python3 html_to_md_converter.py https://example.com/article
 ```
 
+### Paginated Articles
+
+Some articles split their content across multiple numbered pages
+(`?page=1`, `?page=2`, …). The converter can follow that pagination and
+combine the pages into a single Markdown file.
+
+- **Via GUI:** when you paste a URL containing a pagination parameter, a
+  **Pages to capture** field appears. Enter how many pages to grab.
+- **Via Command Line:** use `--pages N`, or run without it to be prompted.
+
+Capture starts from the page number already in the URL and increments. For
+example, a URL ending in `?page=2` with a count of `3` captures pages 2, 3,
+and 4:
+
+```bash
+python3 html_to_md_converter.py "https://example.com/article?page=2" --pages 3
+```
+
+Supported pagination parameters: `page`, `paged`, `pagina`, `pg`, `p`.
+
 ### Medium Articles (Authenticated Access)
 
 Medium gates full article content behind a paywall. This converter supports authenticated access to read member-only articles using your Medium account.
