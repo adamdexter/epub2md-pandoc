@@ -60,7 +60,9 @@ pytest -q             # regression suite (install: pip install -e ".[dev]")
 
 ## Self-Improvement mode (experimental)
 
-Toggle in the EPUB tab. When on, after each conversion `self_improve.py` judges EPUB↔Markdown fidelity and files GitHub issues labelled `self-improvement`; `.github/workflows/self-improve.yml` (Claude Code Action) implements a fix, runs the suite + ruff, opens a PR, and **auto-merges on green CI**. The regression suite is the only safety gate — backed by a baseline-tamper guard and a CI `scope-guard` (the coder can't edit `.github/`), a dedup ledger / caps / circuit-breaker, and the toggle as a kill switch. Needs `ANTHROPIC_API_KEY` (local env for the judge; repo secret for the Action) and the Claude GitHub App installed. `anthropic` is lazy-imported, so the base app runs without it. Full design: `.claude/plans/ok-now-i-have-dynamic-galaxy.md`.
+Toggle in the EPUB tab. When on, after each conversion `self_improve.py` judges EPUB↔Markdown fidelity and files GitHub issues labelled `self-improvement`; `.github/workflows/self-improve.yml` (Claude Code Action) implements a fix, runs the suite + ruff, opens a PR, and **auto-merges on green CI**. The regression suite is the only safety gate — backed by a baseline-tamper guard and a CI `scope-guard` (the coder can't edit `.github/`), a dedup ledger / caps / circuit-breaker, and the toggle as a kill switch.
+
+**Auth (two separate credentials):** the **local judge** uses the Anthropic SDK and needs `ANTHROPIC_API_KEY` in the local env — a Claude subscription OAuth token is *not* a drop-in for the raw Messages API. The **Action** authenticates via `claude_code_oauth_token` (a `CLAUDE_CODE_OAUTH_TOKEN` repo secret generated with `claude setup-token`, for Pro/Max) or `anthropic_api_key`. Requires the Claude GitHub App installed. `anthropic` is lazy-imported, so the base app runs without it. **Status: built + CI-green but NOT activated** (no secret set, `main` not branch-protected). Full design: `.claude/plans/ok-now-i-have-dynamic-galaxy.md`; live handoff: `HANDOFF.md`.
 
 ## Gitignored runtime state
 
