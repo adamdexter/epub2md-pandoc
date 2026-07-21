@@ -17,18 +17,18 @@ Usage:
 """
 
 import os
-import time
 import pickle
 import stat
-from typing import Optional, Tuple
-from urllib.parse import urlparse
 
 # ============================================================================
 # SELENIUM SETUP WITH CLOUDFLARE BYPASS
 # ============================================================================
-
 # Python 3.12+ removed distutils - set up compatibility shim before importing undetected-chromedriver
 import sys
+import time
+from typing import Optional
+from urllib.parse import urlparse
+
 if 'distutils' not in sys.modules:
     try:
         # Try to use setuptools' bundled distutils
@@ -69,12 +69,12 @@ ChromeDriverManager = None
 
 try:
     from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import NoSuchElementException, TimeoutException  # noqa: F401  (availability probe)
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
-    from selenium.common.exceptions import TimeoutException, NoSuchElementException
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC  # noqa: F401  (availability probe)
+    from selenium.webdriver.support.ui import WebDriverWait  # noqa: F401  (availability probe)
     from webdriver_manager.chrome import ChromeDriverManager
     SELENIUM_AVAILABLE = True
 except ImportError:
@@ -441,7 +441,7 @@ def medium_manual_login(driver) -> bool:
 
 def _fetch_article_content(driver, url: str) -> Optional[str]:
     """Navigate to article URL, scroll to trigger lazy loading, return page source."""
-    print(f"      Navigating to article...", flush=True)
+    print("      Navigating to article...", flush=True)
     driver.get(url)
     time.sleep(4)
 
@@ -467,7 +467,7 @@ def _is_paywalled(page_source: str) -> bool:
     return 'member-only story' in page_lower or 'upgrade to read' in page_lower
 
 
-def fetch_medium_with_selenium(url: str) -> Tuple[Optional[str], Optional[str]]:
+def fetch_medium_with_selenium(url: str) -> tuple[Optional[str], Optional[str]]:
     """
     Fetch Medium article using Selenium with authentication.
 

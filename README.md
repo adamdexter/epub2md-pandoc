@@ -74,6 +74,32 @@ Download from [pandoc.org](https://pandoc.org/installing.html)
 pandoc --version
 ```
 
+## One-Click App (macOS)
+
+Want to launch with a single click — no Terminal, ever? Build a native macOS app:
+
+```bash
+./make_app.sh
+```
+
+This creates **`epub2md.app`** in the project folder. Then:
+
+1. **Double-click `epub2md.app`** to launch. The first run sets everything up
+   automatically (you'll see a "First-time setup…" notification), then the
+   converter opens in its **own native window** — no browser tabs, no address
+   bar. It shows up under its own icon and name in the Dock and the ⌘-Tab
+   switcher.
+2. **Drag `epub2md.app` onto your Dock** to keep a permanent one-click shortcut.
+   (You can also `./make_app.sh --install` to copy it into `~/Applications`.)
+3. **To quit:** just close the window (or ⌘-Q). The app serves the converter and
+   hosts the window in one process, so closing it shuts everything down cleanly.
+
+If you move the project folder later, just re-run `./make_app.sh` to rebuild the app.
+
+> Requires Python 3 and Pandoc (see [Requirements](#requirements)). The app
+> auto-installs anything missing on first launch with no prompts. The native
+> window uses `pywebview` (installed automatically into the project's venv).
+
 ## Quick Start (Recommended)
 
 ### 1. Install Dependencies
@@ -210,6 +236,55 @@ Convert web articles (blog posts, news articles, Medium posts) to Markdown.
 ```bash
 python3 html_to_md_converter.py https://example.com/article
 ```
+
+### Paginated Articles
+
+Some articles split their content across multiple numbered pages
+(`?page=1`, `?page=2`, …). The converter can follow that pagination and
+combine the pages into a single Markdown file.
+
+- **Via GUI:** when you paste a URL containing a pagination parameter, a
+  **Pages to capture** field appears. Enter how many pages to grab.
+- **Via Command Line:** use `--pages N`, or run without it to be prompted.
+
+Capture starts from the page number already in the URL and increments. For
+example, a URL ending in `?page=2` with a count of `3` captures pages 2, 3,
+and 4:
+
+```bash
+python3 html_to_md_converter.py "https://example.com/article?page=2" --pages 3
+```
+
+Supported pagination parameters: `page`, `paged`, `pagina`, `pg`, `p`.
+
+### Reddit Posts
+
+Reddit's web pages sit behind a JavaScript bot-check, so a normal fetch only
+returns a "Please wait for verification" page with no article content. The
+converter detects Reddit URLs and uses Reddit's public JSON API instead,
+capturing the post body plus its comment thread:
+
+```bash
+python3 html_to_md_converter.py "https://www.reddit.com/r/programming/comments/abc123/some_post/"
+```
+
+Self-posts, link posts, image galleries, and `/s/` share links are all
+supported.
+
+**If Reddit blocks the request (HTTP 403/429):** since Reddit's 2023 API
+lockdown, the plain JSON endpoint is often refused for non-browser requests.
+Install the optional real-browser fallback:
+
+```bash
+pip install nodriver        # or:  pip install -e ".[reddit]"
+```
+
+With `nodriver` available, a blocked fetch automatically falls back to a real
+Chrome that passes Reddit's "Please wait for verification" gate, then reads the
+post in that verified session. A browser window opens on the first run (it uses
+a dedicated, persistent profile in `.reddit_chrome_profile/`, so later runs are
+faster). This is the same real-browser technique used for Medium. Disabling any
+VPN also helps, since datacenter/VPN IPs are blocked hardest.
 
 ### Medium Articles (Authenticated Access)
 
@@ -678,6 +753,48 @@ This script is optimized for uploading books to Claude Projects:
 5. **Better search** - No formatting artifacts to confuse retrieval
 
 After conversion, simply drag the `.md` files into your Claude Project's knowledge base!
+
+## Self-Improvement Mode (Experimental)
+
+A toggle-able mode that lets the converter **detect and fix its own conversion-quality
+regressions**. When enabled (checkbox on the EPUB tab), after each conversion:
+
+1. An **LLM-as-judge** (`self_improve.py`, Claude via the Anthropic SDK) compares the
+   original EPUB to the produced Markdown and returns structured findings.
+2. Real problems are filed as de-duplicated **GitHub issues** labelled `self-improvement`.
+3. A **Claude Code GitHub Action** (`.github/workflows/self-improve.yml`) implements the
+   fix on a branch, runs the regression suite + ruff, opens a PR, and **auto-merges on
+   green CI**.
+
+It's **off by default** because it consumes API tokens. The regression suite (`tests/`,
+run with `pytest -q`) is the safety gate between an AI fix and `main`, reinforced by a
+baseline-tamper guard, a CI scope-guard, a dedup ledger, per-run/per-day caps, and a
+circuit breaker.
+
+### Setup
+
+```bash
+pip install -e ".[selfimprove]"   # adds the anthropic SDK (judge)
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+To enable the autonomous fixer (the GitHub side):
+
+1. Install the **Claude GitHub App** on the repo (https://github.com/apps/claude).
+2. Add the auth secret the Action uses:
+   - **Claude Pro/Max subscription:** `claude setup-token` (opens a browser, prints a
+     token), then `gh secret set CLAUDE_CODE_OAUTH_TOKEN`. The workflow already uses
+     `claude_code_oauth_token`.
+   - **Anthropic API key instead:** `gh secret set ANTHROPIC_API_KEY` and switch the
+     workflow input back to `anthropic_api_key:`.
+3. Enable **Allow auto-merge** and a **branch-protection rule** on `main` requiring the
+   `test` and `lint` checks.
+
+You can also run the judge manually:
+
+```bash
+python3 self_improve.py /path/to/book.epub "/path/to/output.md" --dry-run
+```
 
 ## License
 

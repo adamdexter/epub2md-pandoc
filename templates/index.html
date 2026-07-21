@@ -600,6 +600,25 @@
                     <div class="help-text">Choose where to save the converted Markdown files</div>
                 </div>
 
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="self-improvement-enabled" onchange="onSelfImproveToggle()">
+                        <label for="self-improvement-enabled">🤖 Self-Improvement mode (experimental)</label>
+                    </div>
+                    <div class="help-text">
+                        After each conversion, an AI judge compares the original EPUB to the Markdown and
+                        files GitHub issues for quality problems, which an automated coder fixes via pull
+                        request. Uses your <code>ANTHROPIC_API_KEY</code> and consumes tokens.
+                    </div>
+                    <div id="self-improve-options" style="display: none; margin-top: 10px;">
+                        <label for="self-improve-model">Judge model</label>
+                        <select id="self-improve-model" onchange="savePreferences()">
+                            <option value="claude-opus-4-8">Claude Opus 4.8 (best quality)</option>
+                            <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (lower cost)</option>
+                        </select>
+                    </div>
+                </div>
+
                 <button type="submit" class="btn btn-primary" id="convert-btn" disabled>
                     Convert EPUBs to Markdown
                 </button>
@@ -619,6 +638,18 @@
                 </div>
                 <div class="progress-log" id="progress-log">
                     <p>Starting conversion...</p>
+                </div>
+            </div>
+
+            <div id="self-improve-container" class="progress-container">
+                <div class="progress-header">
+                    <h3>🤖 Self-Improvement Evaluation</h3>
+                    <span id="self-improve-badge" class="status-badge status-running">
+                        <span class="spinner"></span> Evaluating...
+                    </span>
+                </div>
+                <div class="progress-log" id="self-improve-log">
+                    <p>Waiting for conversion to finish...</p>
                 </div>
             </div>
 
@@ -650,6 +681,14 @@
                             <input type="url" id="article-url" placeholder="https://example.com/blog/article" required>
                         </div>
                         <div class="help-text">Enter the URL of a blog post, news article, or web page to convert</div>
+                    </div>
+
+                    <div class="form-group" id="url-pagination-group" style="display: none;">
+                        <label for="url-page-count">Pages to capture</label>
+                        <input type="number" id="url-page-count" min="1" value="1" style="max-width: 120px;">
+                        <div class="help-text" id="url-pagination-help">
+                            This URL looks paginated. Enter how many pages to capture, starting from this one.
+                        </div>
                     </div>
 
                     <div class="form-group">
@@ -876,6 +915,12 @@
 
                 // Set PDF output folder
                 document.getElementById('pdf-output-folder').value = prefs.pdf_output_folder || 'converted_pdfs';
+
+                // Self-improvement toggle + model
+                const siEnabled = !!prefs.self_improvement_enabled;
+                document.getElementById('self-improvement-enabled').checked = siEnabled;
+                document.getElementById('self-improve-model').value = prefs.self_improve_model || 'claude-opus-4-8';
+                document.getElementById('self-improve-options').style.display = siEnabled ? 'block' : 'none';
             } catch (error) {
                 console.error('Error loading preferences:', error);
             }
@@ -890,11 +935,50 @@
                     body: JSON.stringify({
                         output_folder: document.getElementById('output-folder').value,
                         url_output_folder: document.getElementById('url-output-folder').value,
-                        pdf_output_folder: document.getElementById('pdf-output-folder').value
+                        pdf_output_folder: document.getElementById('pdf-output-folder').value,
+                        self_improvement_enabled: document.getElementById('self-improvement-enabled').checked,
+                        self_improve_model: document.getElementById('self-improve-model').value
                     })
                 });
             } catch (error) {
                 console.error('Error saving preferences:', error);
+            }
+        }
+
+        // Toggle the self-improvement options panel and persist the setting.
+        function onSelfImproveToggle() {
+            const enabled = document.getElementById('self-improvement-enabled').checked;
+            document.getElementById('self-improve-options').style.display = enabled ? 'block' : 'none';
+            savePreferences();
+        }
+
+        // Poll the self-improvement evaluation status (kicked off after conversion).
+        async function pollSelfImprove() {
+            try {
+                const response = await fetch('/self_improve_status');
+                const data = await response.json();
+
+                const log = document.getElementById('self-improve-log');
+                if (data.progress && data.progress.length) {
+                    log.innerHTML = '';
+                    data.progress.forEach(line => {
+                        const p = document.createElement('p');
+                        p.textContent = line;
+                        log.appendChild(p);
+                    });
+                    log.scrollTop = log.scrollHeight;
+                }
+
+                const badge = document.getElementById('self-improve-badge');
+                if (data.completed) {
+                    badge.className = 'status-badge status-complete';
+                    badge.innerHTML = '✓ ' + (data.issues_filed || 0) + ' issue(s) filed';
+                } else {
+                    setTimeout(pollSelfImprove, 1000);
+                }
+            } catch (error) {
+                console.error('Error polling self-improve status:', error);
+                setTimeout(pollSelfImprove, 1500);
             }
         }
 
@@ -976,6 +1060,16 @@
                     document.getElementById('status-badge').innerHTML = '✓ Complete';
                     document.getElementById('convert-btn').innerHTML = 'Convert EPUBs to Markdown';
                     document.getElementById('convert-btn').disabled = inputItems.length === 0;
+
+                    // Self-improvement judge runs after conversion; surface its progress.
+                    if (document.getElementById('self-improvement-enabled').checked) {
+                        const c = document.getElementById('self-improve-container');
+                        c.classList.add('show');
+                        document.getElementById('self-improve-badge').className = 'status-badge status-running';
+                        document.getElementById('self-improve-badge').innerHTML = '<span class="spinner"></span> Evaluating...';
+                        document.getElementById('self-improve-log').innerHTML = '<p>Starting evaluation...</p>';
+                        pollSelfImprove();
+                    }
                 } else if (data.running) {
                     // Continue polling
                     setTimeout(pollStatus, 500);
@@ -1398,12 +1492,54 @@
         // ========== URL Conversion Handlers ==========
 
         // Handle URL form submission
+        // Detect a pagination parameter in the article URL and reveal the
+        // "Pages to capture" field. Mirrors PAGINATION_PARAMS in the backend.
+        const PAGINATION_PARAMS = ['page', 'paged', 'pagina', 'pg', 'p'];
+        function detectPagination(rawUrl) {
+            try {
+                const u = new URL(rawUrl);
+                for (const param of PAGINATION_PARAMS) {
+                    const val = u.searchParams.get(param);
+                    if (val !== null && /^\d+$/.test(val)) {
+                        return { param: param, page: parseInt(val, 10) };
+                    }
+                }
+            } catch (e) {
+                // Not a valid/complete URL yet — ignore.
+            }
+            return null;
+        }
+
+        function updatePaginationField() {
+            const url = document.getElementById('article-url').value.trim();
+            const group = document.getElementById('url-pagination-group');
+            const help = document.getElementById('url-pagination-help');
+            const detected = detectPagination(url);
+            if (detected) {
+                group.style.display = '';
+                help.textContent =
+                    `This URL is paginated (?${detected.param}=${detected.page}). ` +
+                    `Enter how many pages to capture, starting from page ${detected.page}.`;
+            } else {
+                group.style.display = 'none';
+            }
+        }
+
+        document.getElementById('article-url').addEventListener('input', updatePaginationField);
+
         document.getElementById('url-converter-form').addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const url = document.getElementById('article-url').value.trim();
             const outputFolder = document.getElementById('url-output-folder').value;
             const downloadImages = document.getElementById('download-images').checked;
+
+            // Only send a page count if the URL looks paginated and the field is visible
+            let pageCount = 1;
+            if (document.getElementById('url-pagination-group').style.display !== 'none') {
+                pageCount = parseInt(document.getElementById('url-page-count').value, 10) || 1;
+                if (pageCount < 1) pageCount = 1;
+            }
 
             if (!url) {
                 alert('Please enter a URL');
@@ -1431,7 +1567,8 @@
                     body: JSON.stringify({
                         url: url,
                         output_folder: outputFolder,
-                        download_images: downloadImages
+                        download_images: downloadImages,
+                        page_count: pageCount
                     })
                 });
 
@@ -1511,7 +1648,10 @@
         // Copy URL logs
         async function copyUrlLogs() {
             const logContainer = document.getElementById('url-progress-log');
-            const logText = logContainer.innerText;
+            const resultContainer = document.getElementById('url-result-message');
+            // Include the final success/error banner, not just the progress lines.
+            const resultText = resultContainer ? resultContainer.innerText.trim() : '';
+            const logText = logContainer.innerText + (resultText ? '\n\n' + resultText : '');
 
             try {
                 await navigator.clipboard.writeText(logText);

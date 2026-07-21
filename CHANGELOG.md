@@ -2,6 +2,96 @@
 
 All notable changes to epub2md-pandoc are tracked here.
 
+## [Unreleased]
+
+### Added
+- **Reddit real-browser fallback (`reddit_browser.py`, optional)** — Reddit's
+  post-2023 lockdown blocks the plain JSON endpoint for non-browser requests, so
+  Reddit conversions often failed with HTTP 403. When the direct fetch is blocked
+  and `nodriver` is installed, the converter now falls back to a real Chrome that
+  passes Reddit's "Please wait for verification" gate, then does an in-page
+  `fetch()` of the `.json` in that verified session (reusing the existing parser).
+  Uses a dedicated persistent profile (`.reddit_chrome_profile/`); same technique
+  as the Medium path. Install with `pip install nodriver` or `pip install -e
+  ".[reddit]"`. The base app runs without it (feature-flagged), and the error
+  message points users to it when missing.
+
+### Fixed
+- **SSL certificate failures no longer masquerade as connectivity errors, and now
+  recover** — sites that ship an incomplete/misconfigured certificate chain (missing
+  intermediate CA) raised `requests.exceptions.SSLError`, which subclasses
+  `ConnectionError` and so was reported as the misleading "Connection error — check
+  your internet connection." The fetcher now retries once without verification (with
+  a clear warning) so such articles still convert, and a genuine SSL failure is
+  reported as an SSL error rather than a network problem.
+- **Copy Logs / on-screen log now include the final outcome** — the web-article
+  progress log and its "Copy Logs" button previously omitted the success/error
+  banner, so a copied log ended mid-run with no result. The final message is now
+  appended to the progress log and included when copying.
+- **Reddit fetch is more resilient** — tries `old.reddit.com` as well as
+  `www.reddit.com`, uses a full browser-like header set + shared session, and
+  returns a clearer, accurate error when Reddit blocks the request. (Reddit's
+  post-2023 API lockdown still blocks unauthenticated access in many cases; see
+  Known limitations.)
+- **Garbled output / failed extraction on brotli-serving sites** — the web-article
+  fetcher advertised `Accept-Encoding: ...br` but couldn't decode brotli unless the
+  optional `brotli` package was installed. Affected servers (e.g. domyown.com) then
+  returned brotli-compressed bytes that got mis-decoded into binary garbage, so every
+  extractor failed and the converter produced empty/incorrect output (this also made
+  multi-page captures look broken). The fetcher now advertises only the compressions
+  it can actually decode (detected at runtime), decodes a stray brotli/zstd response
+  itself when possible, and otherwise fails with a clear "install the decoder" message.
+  `brotli` is now a declared dependency for native decoding.
+
+### Added
+- **Reddit posts** — Reddit pages are served behind a JavaScript bot-check
+  ("Please wait for verification"), so the generic HTML extractors only ever
+  saw the interstitial and produced no content. Reddit URLs are now detected
+  and routed through Reddit's public JSON API instead, rendering the post body
+  and (nested) comments to Markdown with author/subreddit/date metadata.
+  Handles self/link/gallery posts and `/s/` share links; surfaces a clear
+  message when Reddit rate-limits the request.
+- **Paginated web articles** — the web-article converter can now follow
+  pagination query parameters (`?page=`, `?pg=`, `?paged=`, etc.) and combine
+  multiple pages into a single Markdown file:
+  - When a URL with a pagination parameter is detected, the GUI reveals a
+    "Pages to capture" field and the CLI prompts for a page count.
+  - Capture starts from the page number in the URL and increments. For example,
+    a URL ending in `?page=2` with a count of `3` captures pages 2, 3, and 4.
+  - New `--pages N` flag on `html_to_md_converter.py` for non-interactive use;
+    `convert_url_to_markdown()` gains a `page_count` parameter. Images on later
+    pages are also captured and de-duplicated.
+
+## [3.2.0] - 2026-06-19
+
+### Added
+- **Self-Improvement mode (experimental)** — a toggle-able loop that lets the
+  converter detect and fix its own conversion-quality regressions:
+  - When enabled (EPUB tab toggle), after each conversion an LLM-as-judge
+    (`self_improve.py`, Anthropic SDK, `claude-opus-4-8` by default / `claude-sonnet-4-6`
+    as a cost option) compares the original EPUB's reference text to the produced
+    Markdown and returns structured findings (`messages.parse` + Pydantic schema).
+  - Real problems are filed as de-duplicated GitHub issues labelled `self-improvement`;
+    a Claude Code GitHub Action (`.github/workflows/self-improve.yml`) implements the
+    fix, runs the regression suite + ruff, opens a PR, and **auto-merges on green CI**.
+  - Safety rails: a regression test suite (`tests/`) as the merge gate, a
+    baseline-tamper guard, a CI scope-guard (the coder can't edit CI/workflows), a
+    dedup ledger + per-run/per-day caps + a circuit breaker (routes risky/recurring
+    findings to a `self-improvement-hold` label) in `~/.epub2md_eval_history.json`,
+    and the toggle itself as a kill switch.
+- **New `epub_text.py`** — spine-aware plain-text extraction from EPUBs for the judge.
+- **Regression test suite (`tests/`)** — pytest harness with a synthetic-EPUB
+  end-to-end conversion (runs in CI), oracle unit tests, optional real-corpus
+  floors/ceilings, and the baseline-tamper guard. `pytest -q` is now the CI gate.
+- `epub_to_md_converter.process_folder()` now returns `(epub_path, md_path)` pairs;
+  new `collect_quality_signals()` shares one quality oracle between the judge and tests.
+
+### Fixed
+- **CI workflow was malformed YAML** (an inline `run:` step contained a colon-space
+  inside an unquoted scalar) and had never run successfully — converted to block
+  scalars so CI executes.
+- Cleared all pre-existing `ruff` violations repo-wide so `lint` passes.
+
 ## [3.1.0] - 2026-05-07
 
 ### Added

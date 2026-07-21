@@ -5,14 +5,13 @@ Converts all EPUB files in a folder to Markdown with AI-optimized filenames.
 """
 
 import os
-import subprocess
 import re
-import sys
-from pathlib import Path
-from typing import Optional, Tuple
+import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
 from version import __version__ as CONVERTER_VERSION
 
@@ -21,7 +20,7 @@ EPUB_QUALITY_THRESHOLD = 70.0  # Minimum quality score (0-100)
 SKIP_LOW_QUALITY_EPUBS = True  # Set to False to disable pre-check
 ALLOW_QUALITY_OVERRIDE = True  # Allow user to override skip decision
 
-def extract_epub_metadata(epub_path: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def extract_epub_metadata(epub_path: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Extract metadata from EPUB file (title, author, year, edition).
     
@@ -231,7 +230,7 @@ def build_toc_anchor_map(content: str) -> dict:
     return mapping
 
 
-def apply_toc_anchor_headings(content: str, anchor_map: dict) -> Tuple[str, int]:
+def apply_toc_anchor_headings(content: str, anchor_map: dict) -> tuple[str, int]:
     """Insert `# heading` lines at each `[]{#anchor}` marker found in body."""
     if not anchor_map:
         return content, 0
@@ -294,9 +293,9 @@ def assess_epub_quality(epub_path: str) -> dict:
             - recommendation: str ('proceed', 'skip', 'review')
             - details: dict (detailed metrics)
     """
-    import tempfile
     import os
     import subprocess
+    import tempfile
 
     # Create temporary file for test conversion
     with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as tmp:
@@ -323,7 +322,7 @@ def assess_epub_quality(epub_path: str) -> dict:
             }
 
         # Read and analyze the temporary conversion
-        with open(tmp_path, 'r', encoding='utf-8') as f:
+        with open(tmp_path, encoding='utf-8') as f:
             content = f.read()
 
         # Analyze structure and artifacts
@@ -331,15 +330,15 @@ def assess_epub_quality(epub_path: str) -> dict:
         line_count = len(lines)
 
         # Count potential issues
-        heading_count = len([l for l in lines if l.strip().startswith('#')])
+        heading_count = len([line for line in lines if line.strip().startswith('#')])
         html_blocks = content.count('``{=html}')
 
         # Check for styled text that should be headings (HeART book pattern)
-        calibre_markers = len([l for l in lines if '{.calibre' in l and l.strip().startswith('[')])
+        calibre_markers = len([line for line in lines if '{.calibre' in line and line.strip().startswith('[')])
 
         # Check for ALL-CAPS lines (potential undetected headings)
-        caps_lines = len([l for l in lines if l.strip() and len(l.strip()) > 10 and
-                         l.strip().isupper() and not l.strip().startswith('#')])
+        caps_lines = len([line for line in lines if line.strip() and len(line.strip()) > 10 and
+                         line.strip().isupper() and not line.strip().startswith('#')])
 
         # Check for TOC-anchored chapter pattern (Sway-style EPUBs):
         # `[**Chapter X**...](#anchor)` links in TOC + `[]{#anchor}` markers in body
@@ -350,7 +349,7 @@ def assess_epub_quality(epub_path: str) -> dict:
         )
 
         # Count artifacts
-        header_attrs = len([l for l in lines if l.strip().startswith('#') and '{' in l])
+        header_attrs = len([line for line in lines if line.strip().startswith('#') and '{' in line])
         role_attrs = content.count('role=')
         bracket_classes = len(re.findall(r'\[[^\]]+\]\{[^}]+\}', content))
 
@@ -474,6 +473,44 @@ def calculate_optimization_score(artifacts: dict) -> float:
     score -= (artifacts['blockquote_divs'] / density_factor) * 0.05
 
     return max(0.0, score)
+
+
+def collect_quality_signals(epub_path: str, md_path: str) -> dict:
+    """
+    Gather the converter's deterministic quality signals for a converted file.
+
+    Reuses the existing scoring functions so the LLM judge and the regression
+    tests share one oracle. Returns a JSON-serializable dict.
+
+    Args:
+        epub_path: Path to the original EPUB.
+        md_path: Path to the produced Markdown file.
+    """
+    with open(md_path, encoding='utf-8') as f:
+        md_content = f.read()
+
+    artifacts = analyze_artifacts(md_content)
+    optimization_score = calculate_optimization_score(artifacts)
+    heading_count = len(re.findall(r'^#{1,6}\s+', md_content, re.MULTILINE))
+
+    try:
+        epub_quality = assess_epub_quality(epub_path)
+    except Exception as e:  # pre-check is best-effort; never block on it
+        epub_quality = {
+            'score': None,
+            'issues': [f'assessment error: {e}'],
+            'recommendation': 'unknown',
+            'details': {},
+        }
+
+    return {
+        'optimization_score': round(optimization_score, 2),
+        'artifacts': artifacts,
+        'line_count': artifacts['line_count'],
+        'heading_count': heading_count,
+        'md_char_count': len(md_content),
+        'epub_quality': epub_quality,
+    }
 
 
 def apply_aggressive_cleanup(content: str, artifacts: dict, verbose: bool = False) -> str:
@@ -825,7 +862,7 @@ def convert_epub_to_md(epub_path: str, output_path: str,
     # ========================================================================
 
     if SKIP_LOW_QUALITY_EPUBS:
-        print(f"  🔍 Running quality pre-check...")
+        print("  🔍 Running quality pre-check...")
         assessment = assess_epub_quality(epub_path)
 
         score = assessment['score']
@@ -835,33 +872,33 @@ def convert_epub_to_md(epub_path: str, output_path: str,
         print(f"     Quality Score: {score:.1f}% (threshold: {EPUB_QUALITY_THRESHOLD}%)")
 
         if issues:
-            print(f"     Issues detected:")
+            print("     Issues detected:")
             for issue in issues:
                 print(f"       • {issue}")
 
         if recommendation == 'skip':
-            print(f"  ⚠️  QUALITY BELOW THRESHOLD - SKIPPING")
-            print(f"     Detected issues:")
+            print("  ⚠️  QUALITY BELOW THRESHOLD - SKIPPING")
+            print("     Detected issues:")
             for issue in issues:
                 print(f"       • {issue}")
 
             # Show detailed metrics
             details = assessment['details']
             if details.get('calibre_markers', 0) > 50:
-                print(f"     💡 Tip: This EPUB may need heading conversion script")
+                print("     💡 Tip: This EPUB may need heading conversion script")
                 print(f"        ({details['calibre_markers']} Calibre-style markers found)")
 
             if ALLOW_QUALITY_OVERRIDE:
-                print(f"\n     To process anyway, set SKIP_LOW_QUALITY_EPUBS = False")
+                print("\n     To process anyway, set SKIP_LOW_QUALITY_EPUBS = False")
                 print(f"     or adjust EPUB_QUALITY_THRESHOLD (current: {EPUB_QUALITY_THRESHOLD}%)")
 
             return False  # Skip this file
 
         elif recommendation == 'proceed':
             if issues:
-                print(f"     ⚠️  Issues detected but above threshold - proceeding")
+                print("     ⚠️  Issues detected but above threshold - proceeding")
             else:
-                print(f"     ✓ Quality check passed")
+                print("     ✓ Quality check passed")
 
         print()  # Blank line before conversion starts
 
@@ -883,7 +920,8 @@ def convert_epub_to_md(epub_path: str, output_path: str,
             '--markdown-headings=atx',      # Use # style headings
             '--wrap=none',                   # Don't wrap lines
             '--strip-comments',              # Remove HTML comments
-            '--reference-links=false',       # Use inline links
+            # (inline links are pandoc's default; the old `--reference-links=false`
+            #  is rejected by older pandoc — e.g. CI's — so we just omit it)
             '--standalone',                  # Produce standalone document
         ]
 
@@ -897,9 +935,9 @@ def convert_epub_to_md(epub_path: str, output_path: str,
             return False
 
         # Post-process the markdown file for Claude optimization
-        print(f"  🔍 Analyzing artifacts...")
+        print("  🔍 Analyzing artifacts...")
 
-        with open(output_path, 'r', encoding='utf-8') as f:
+        with open(output_path, encoding='utf-8') as f:
             original_content = f.read()
 
         original_size = len(original_content)
@@ -991,7 +1029,7 @@ def convert_epub_to_md(epub_path: str, output_path: str,
 
         print(f"  📋 Total artifacts found: {total_artifacts}")
         if total_artifacts > 0:
-            print(f"     Details:")
+            print("     Details:")
             if artifacts['header_ids'] > 0:
                 print(f"       • Header IDs: {artifacts['header_ids']}")
             if artifacts['html_blocks'] > 0:
@@ -1012,8 +1050,8 @@ def convert_epub_to_md(epub_path: str, output_path: str,
 
         # Phase 2: Conditional cleanup with 85% threshold
         if score < 85.0:
-            print(f"  🧹 Running aggressive cleanup (score < 85%)...")
-            print(f"     Step 1: Applying aggressive artifact removal...")
+            print("  🧹 Running aggressive cleanup (score < 85%)...")
+            print("     Step 1: Applying aggressive artifact removal...")
 
             # First apply aggressive cleanup for suboptimal EPUBs
             cleaned_content = apply_aggressive_cleanup(original_content, artifacts, verbose=True)
@@ -1023,7 +1061,7 @@ def convert_epub_to_md(epub_path: str, output_path: str,
             mid_reduction = ((original_size - mid_size) / original_size * 100) if original_size > 0 else 0
             print(f"     Step 1 complete: {mid_reduction:.1f}% reduction")
 
-            print(f"     Step 2: Applying standard Claude optimizations...")
+            print("     Step 2: Applying standard Claude optimizations...")
             # Then apply standard Claude optimizations
             cleaned_content = clean_markdown_for_claude(cleaned_content, title, author, year)
 
@@ -1035,9 +1073,9 @@ def convert_epub_to_md(epub_path: str, output_path: str,
             print(f"  ✨ Post-cleanup score: {post_score:.1f}%")
             print(f"  📉 Artifacts remaining: {post_total} (removed {total_artifacts - post_total})")
         else:
-            print(f"  ✅ File already optimal (score ≥ 85%)")
-            print(f"  ⏭️  Skipping all cleanup operations")
-            print(f"  📝 Adding metadata header only...")
+            print("  ✅ File already optimal (score ≥ 85%)")
+            print("  ⏭️  Skipping all cleanup operations")
+            print("  📝 Adding metadata header only...")
             # File is already clean - only add metadata, don't run cleanup
             cleaned_content = add_metadata_only(original_content, title, author, year)
 
@@ -1058,7 +1096,7 @@ def convert_epub_to_md(epub_path: str, output_path: str,
         if reduction > 0:
             print(f"  🎯 Reduced by: {reduction:.1f}%")
         print(f"  📑 Headings found: {heading_count}")
-        print(f"  🎉 Ready for Claude Projects!")
+        print("  🎉 Ready for Claude Projects!")
 
         return True
 
@@ -1067,7 +1105,7 @@ def convert_epub_to_md(epub_path: str, output_path: str,
         return False
 
 
-def process_folder(input_folder: str, output_folder: str = "md processed books"):
+def process_folder(input_folder: str, output_folder: str = "md processed books") -> list:
     """
     Process all EPUB files in the input folder.
     
@@ -1079,20 +1117,20 @@ def process_folder(input_folder: str, output_folder: str = "md processed books")
     if not check_pandoc_installed():
         print("❌ Error: Pandoc is not installed or not in PATH.")
         print("Please install Pandoc from: https://pandoc.org/installing.html")
-        return
+        return []
     
     # Get input folder path
     input_path = Path(input_folder)
     if not input_path.exists():
         print(f"❌ Error: Input folder '{input_folder}' does not exist.")
-        return
+        return []
     
     # Find all EPUB files
     epub_files = list(input_path.glob("*.epub"))
     
     if not epub_files:
         print(f"No EPUB files found in '{input_folder}'")
-        return
+        return []
     
     print(f"Found {len(epub_files)} EPUB file(s) to convert.\n")
     
@@ -1103,6 +1141,7 @@ def process_folder(input_folder: str, output_folder: str = "md processed books")
     # Process each EPUB file
     successful = 0
     failed = 0
+    converted_pairs = []  # (epub_path, md_path) for each successful conversion
     
     for i, epub_file in enumerate(epub_files, 1):
         print(f"[{i}/{len(epub_files)}] Processing: {epub_file.name}")
@@ -1130,19 +1169,22 @@ def process_folder(input_folder: str, output_folder: str = "md processed books")
 
         # Convert file with metadata
         if convert_epub_to_md(str(epub_file), str(output_file), title, author, year):
-            print(f"  ✅ Conversion successful!\n")
+            print("  ✅ Conversion successful!\n")
             successful += 1
+            converted_pairs.append((str(epub_file), str(output_file)))
         else:
-            print(f"  ❌ Conversion failed!\n")
+            print("  ❌ Conversion failed!\n")
             failed += 1
     
     # Print summary
     print("=" * 60)
-    print(f"Conversion complete!")
+    print("Conversion complete!")
     print(f"✅ Successful: {successful}")
     if failed > 0:
         print(f"❌ Failed: {failed}")
     print(f"📁 Output folder: {output_path.absolute()}")
+
+    return converted_pairs
 
 
 def main():

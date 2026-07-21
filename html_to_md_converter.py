@@ -5,18 +5,16 @@ Converts web articles (blog posts, Medium articles, etc.) to AI-optimized Markdo
 Designed for Claude Projects and RAG systems.
 """
 
-import os
+import html
+import importlib.util
+import json
+import mimetypes
 import re
 import sys
-import json
-import time
-import hashlib
-import mimetypes
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple, Dict, List, Any
-from datetime import datetime
-from urllib.parse import urlparse, urljoin
-import html
+from typing import Any, Optional
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from version import __version__ as CONVERTER_VERSION
 
@@ -34,7 +32,7 @@ except ImportError:
     pass
 
 try:
-    import trafilatura
+    import trafilatura  # noqa: F401  (availability probe)
     from trafilatura import extract
     from trafilatura.metadata import extract_metadata
     TRAFILATURA_AVAILABLE = True
@@ -62,12 +60,7 @@ is_medium_url = None
 fetch_medium_with_selenium = None
 
 try:
-    from medium_scraper import (
-        is_medium_url,
-        fetch_medium_with_selenium,
-        MEDIUM_SUPPORT_AVAILABLE,
-        SELENIUM_AVAILABLE
-    )
+    from medium_scraper import MEDIUM_SUPPORT_AVAILABLE, SELENIUM_AVAILABLE, fetch_medium_with_selenium, is_medium_url
 except ImportError:
     # Medium support not available - that's OK, core functionality still works
     SELENIUM_AVAILABLE = False
@@ -81,19 +74,73 @@ except ImportError:
         return None, "Medium support not installed. Run: pip install selenium webdriver-manager undetected-chromedriver"
 
 
+# ============================================================================
+# OPTIONAL: Reddit real-browser fallback (via nodriver)
+# Used only when Reddit blocks the plain JSON fetch; the base app runs without it.
+# ============================================================================
+REDDIT_BROWSER_AVAILABLE = False
+fetch_reddit_json_via_browser = None
+
+try:
+    from reddit_browser import REDDIT_BROWSER_AVAILABLE, fetch_reddit_json_via_browser
+except ImportError:
+    pass
+
+
+def _supported_accept_encoding() -> str:
+    """
+    Build an Accept-Encoding value listing only the compressions we can decode.
+
+    requests/urllib3 decode gzip and deflate out of the box, but brotli (``br``)
+    and zstd require optional packages. Advertising ``br`` without the decoder
+    makes servers return brotli-compressed bytes that requests can't unpack,
+    which then get mis-decoded into garbage. So only claim what we can handle.
+    """
+    encodings = ['gzip', 'deflate']
+    if importlib.util.find_spec('brotli') or importlib.util.find_spec('brotlicffi'):
+        encodings.append('br')
+    if importlib.util.find_spec('zstandard'):
+        encodings.append('zstd')
+    return ', '.join(encodings)
+
+
 # Default headers to mimic a real browser
 DEFAULT_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
+    'Accept-Encoding': _supported_accept_encoding(),
     'DNT': '1',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
 }
 
 
-def check_dependencies() -> Tuple[bool, List[str]]:
+def _manual_decompress(data: bytes, encoding: str) -> Optional[bytes]:
+    """
+    Decompress a brotli/zstd response body when requests couldn't.
+
+    Returns the decompressed bytes, or None if the required decoder isn't
+    installed or decompression fails.
+    """
+    encoding = encoding.lower()
+    try:
+        if 'br' in encoding:
+            try:
+                import brotli
+                return brotli.decompress(data)
+            except ImportError:
+                import brotlicffi
+                return brotlicffi.decompress(data)
+        if 'zstd' in encoding:
+            import zstandard
+            return zstandard.ZstdDecompressor().decompress(data)
+    except Exception:
+        return None
+    return None
+
+
+def check_dependencies() -> tuple[bool, list[str]]:
     """Check if required dependencies are installed."""
     missing = []
 
@@ -107,6 +154,52 @@ def check_dependencies() -> Tuple[bool, List[str]]:
     # readability-lxml is optional (fallback)
 
     return len(missing) == 0, missing
+
+
+# Query parameters commonly used for pagination, in priority order.
+# 'p' is last because it's the most ambiguous (can mean other things).
+PAGINATION_PARAMS = ['page', 'paged', 'pagina', 'pg', 'p']
+
+
+def detect_pagination_param(url: str) -> Optional[tuple[str, int]]:
+    """
+    Detect a pagination query parameter in a URL.
+
+    Looks for common pagination params (?page=, ?pg=, etc.) whose value is a
+    plain integer.
+
+    Returns:
+        (param_name, current_page_number) if found, else None.
+    """
+    parsed = urlparse(url)
+    if not parsed.query:
+        return None
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for param in PAGINATION_PARAMS:
+        value = query.get(param)
+        if value is not None and value.isdigit():
+            return param, int(value)
+    return None
+
+
+def build_page_url(url: str, param: str, page_number: int) -> str:
+    """
+    Return ``url`` with the pagination ``param`` set to ``page_number``,
+    preserving all other query parameters and their order.
+    """
+    parsed = urlparse(url)
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    new_pairs = []
+    replaced = False
+    for key, value in pairs:
+        if key == param:
+            new_pairs.append((key, str(page_number)))
+            replaced = True
+        else:
+            new_pairs.append((key, value))
+    if not replaced:
+        new_pairs.append((param, str(page_number)))
+    return urlunparse(parsed._replace(query=urlencode(new_pairs)))
 
 
 def sanitize_html(html_content: str) -> str:
@@ -154,7 +247,7 @@ def _is_gift_link(url: str) -> bool:
     return any(p in params for p in gift_params)
 
 
-def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]]:
+def fetch_url(url: str, timeout: int = 30) -> tuple[Optional[str], Optional[str]]:
     """
     Fetch URL content with proper headers.
 
@@ -172,10 +265,10 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
 
     if is_paywall:
         if is_gift:
-            print(f"      Detected gift/share link from paywalled site", flush=True)
+            print("      Detected gift/share link from paywalled site", flush=True)
         else:
-            print(f"      Warning: This appears to be a paywalled site. Content may be truncated.", flush=True)
-            print(f"      Tip: Use a gift/share link for full article access.", flush=True)
+            print("      Warning: This appears to be a paywalled site. Content may be truncated.", flush=True)
+            print("      Tip: Use a gift/share link for full article access.", flush=True)
 
     try:
         # Use a session to preserve cookies through redirects (important for gift links)
@@ -190,12 +283,29 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
             if not is_gift:
                 headers['Referer'] = 'https://www.google.com/'
 
-        response = session.get(
-            url,
-            headers=headers,
-            timeout=timeout,
-            allow_redirects=True
-        )
+        try:
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True
+            )
+        except requests.exceptions.SSLError:
+            # Some sites ship an incomplete/misconfigured certificate chain (missing
+            # intermediate CA). Browsers fetch the missing cert automatically; requests
+            # doesn't. Retry once without verification so the article still converts.
+            print("      Warning: SSL certificate verification failed — the site has an "
+                  "incomplete/misconfigured certificate chain.", flush=True)
+            print("      Retrying without certificate verification...", flush=True)
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True,
+                verify=False
+            )
 
         # For paywalled sites, a 401/403 with a gift link is likely a token issue
         if response.status_code in (401, 403) and is_paywall:
@@ -212,11 +322,27 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
 
         response.raise_for_status()
 
-        # Try to detect encoding
-        response.encoding = response.apparent_encoding or 'utf-8'
+        # Defensive: if the server ignored our Accept-Encoding and sent a
+        # compression requests can't unpack (brotli/zstd without the optional
+        # decoder), the bytes stay compressed and the Content-Encoding header
+        # lingers. Decode it ourselves if possible, else fail clearly instead
+        # of emitting mis-decoded garbage.
+        leftover_enc = response.headers.get('Content-Encoding', '').lower()
+        if 'br' in leftover_enc or 'zstd' in leftover_enc:
+            decoded = _manual_decompress(response.content, leftover_enc)
+            if decoded is None:
+                pkg = 'brotli' if 'br' in leftover_enc else 'zstandard'
+                return None, (
+                    f"Server returned {leftover_enc}-compressed content that could not be "
+                    f"decoded. Install the optional decoder with: pip install {pkg}"
+                )
+            content = sanitize_html(decoded.decode('utf-8', errors='replace'))
+        else:
+            # Try to detect encoding
+            response.encoding = response.apparent_encoding or 'utf-8'
 
-        # Sanitize HTML to remove control characters
-        content = sanitize_html(response.text)
+            # Sanitize HTML to remove control characters
+            content = sanitize_html(response.text)
 
         # Check if paywalled content was truncated
         if is_paywall and content:
@@ -230,9 +356,9 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
                 'subscribe now',
             ]
             if any(sig in content_lower for sig in truncation_signals):
-                print(f"      Warning: Article appears to be truncated by paywall", flush=True)
+                print("      Warning: Article appears to be truncated by paywall", flush=True)
                 if not is_gift:
-                    print(f"      Tip: Use a gift/share link for full content", flush=True)
+                    print("      Tip: Use a gift/share link for full content", flush=True)
 
         return content, None
 
@@ -242,13 +368,17 @@ def fetch_url(url: str, timeout: int = 30) -> Tuple[Optional[str], Optional[str]
         status = e.response.status_code if e.response is not None else 'unknown'
         reason = e.response.reason if e.response is not None else str(e)
         return None, f"HTTP error: {status} - {reason}"
+    except requests.exceptions.SSLError as e:
+        # Must precede ConnectionError (SSLError subclasses it), or this reads as a
+        # misleading "check your internet connection".
+        return None, f"SSL certificate error (the site's HTTPS certificate could not be verified): {e}"
     except requests.exceptions.ConnectionError:
         return None, "Connection error - check your internet connection"
     except requests.exceptions.RequestException as e:
         return None, f"Request failed: {str(e)}"
 
 
-def extract_json_ld_metadata(html_content: str) -> Dict[str, Any]:
+def extract_json_ld_metadata(html_content: str) -> dict[str, Any]:
     """Extract metadata from JSON-LD structured data."""
     metadata = {}
 
@@ -281,7 +411,7 @@ def extract_json_ld_metadata(html_content: str) -> Dict[str, Any]:
     return metadata
 
 
-def parse_json_ld_item(item: Dict) -> Dict[str, Any]:
+def parse_json_ld_item(item: dict) -> dict[str, Any]:
     """Parse a single JSON-LD item for metadata."""
     metadata = {}
 
@@ -337,7 +467,7 @@ def parse_json_ld_item(item: Dict) -> Dict[str, Any]:
     return metadata
 
 
-def extract_opengraph_metadata(html_content: str) -> Dict[str, Any]:
+def extract_opengraph_metadata(html_content: str) -> dict[str, Any]:
     """Extract metadata from OpenGraph and Twitter meta tags."""
     metadata = {}
 
@@ -398,7 +528,7 @@ def extract_opengraph_metadata(html_content: str) -> Dict[str, Any]:
     return metadata
 
 
-def extract_tags_and_topics(html_content: str) -> List[str]:
+def extract_tags_and_topics(html_content: str) -> list[str]:
     """Extract tags, topics, categories from the article."""
     tags = set()
 
@@ -458,7 +588,7 @@ def extract_tags_and_topics(html_content: str) -> List[str]:
     return sorted(set(cleaned_tags))[:20]  # Limit to 20 tags
 
 
-def extract_table_of_contents(html_content: str) -> List[Dict[str, Any]]:
+def extract_table_of_contents(html_content: str) -> list[dict[str, Any]]:
     """Extract table of contents from headings in the article."""
     toc = []
 
@@ -502,7 +632,7 @@ def extract_table_of_contents(html_content: str) -> List[Dict[str, Any]]:
     return toc
 
 
-def format_toc_for_markdown(toc: List[Dict[str, Any]], title: str = None) -> str:
+def format_toc_for_markdown(toc: list[dict[str, Any]], title: str = None) -> str:
     """Format table of contents as markdown."""
     if not toc:
         return ""
@@ -519,7 +649,7 @@ def format_toc_for_markdown(toc: List[Dict[str, Any]], title: str = None) -> str
     return '\n'.join(lines) + '\n'
 
 
-def extract_toc_from_markdown(markdown_content: str) -> List[Dict[str, Any]]:
+def extract_toc_from_markdown(markdown_content: str) -> list[dict[str, Any]]:
     """
     Extract table of contents from markdown headings.
     This is more reliable than extracting from HTML as it works on the final cleaned content.
@@ -551,7 +681,7 @@ def extract_toc_from_markdown(markdown_content: str) -> List[Dict[str, Any]]:
     return toc
 
 
-def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
+def extract_spa_metadata(html_content: str, url: str) -> dict[str, Any]:
     """
     Extract metadata from modern SPA (Single Page Application) sites.
     Handles sites like Heavybit, Medium, Substack that use React/Vue/etc.
@@ -822,7 +952,7 @@ def extract_spa_metadata(html_content: str, url: str) -> Dict[str, Any]:
     return metadata
 
 
-def extract_html_metadata(html_content: str, url: str) -> Dict[str, Any]:
+def extract_html_metadata(html_content: str, url: str) -> dict[str, Any]:
     """Extract metadata by parsing HTML structure."""
     metadata = {}
 
@@ -949,7 +1079,7 @@ def extract_html_metadata(html_content: str, url: str) -> Dict[str, Any]:
     return metadata
 
 
-def merge_metadata(*metadata_dicts: Dict[str, Any]) -> Dict[str, Any]:
+def merge_metadata(*metadata_dicts: dict[str, Any]) -> dict[str, Any]:
     """Merge multiple metadata dictionaries, preferring earlier sources."""
     merged = {}
 
@@ -1063,7 +1193,7 @@ def preprocess_medium_html(html_content: str) -> str:
         return html_content
 
 
-def extract_article_content(html_content: str, url: str) -> Tuple[Optional[str], Dict[str, Any]]:
+def extract_article_content(html_content: str, url: str) -> tuple[Optional[str], dict[str, Any]]:
     """
     Extract main article content from HTML.
     Uses trafilatura as primary, with readability-lxml and BeautifulSoup as fallbacks.
@@ -1354,7 +1484,7 @@ def html_to_simple_markdown(html_content: str) -> str:
     return text.strip()
 
 
-def extract_images(html_content: str, base_url: str) -> List[Dict[str, str]]:
+def extract_images(html_content: str, base_url: str) -> list[dict[str, str]]:
     """
     Extract image information from HTML content.
     Enhanced for SPA sites with og:image fallback and CDN handling.
@@ -1492,7 +1622,7 @@ def extract_images(html_content: str, base_url: str) -> List[Dict[str, str]]:
     return images
 
 
-def download_image(image_url: str, output_dir: Path, base_name: str, index: int) -> Tuple[Optional[str], Optional[str]]:
+def download_image(image_url: str, output_dir: Path, base_name: str, index: int) -> tuple[Optional[str], Optional[str]]:
     """
     Download an image and save it locally.
 
@@ -1578,7 +1708,7 @@ def sanitize_filename(text: str) -> str:
     return text
 
 
-def create_output_filename(metadata: Dict[str, Any], url: str) -> str:
+def create_output_filename(metadata: dict[str, Any], url: str) -> str:
     """
     Create output filename in format: Author - Title - Source.md
     """
@@ -1649,10 +1779,10 @@ def format_date(date_str: Optional[str]) -> Optional[str]:
 
 
 def generate_yaml_frontmatter(
-    metadata: Dict[str, Any],
+    metadata: dict[str, Any],
     url: str,
     reading_time: int,
-    tags: List[str] = None,
+    tags: list[str] = None,
     has_toc: bool = False
 ) -> str:
     """Generate YAML frontmatter for the markdown file."""
@@ -1862,12 +1992,309 @@ def clean_markdown_for_rag(content: str) -> str:
 
 
 
-def convert_url_to_markdown(
+# ============================================================================
+# Reddit support
+#
+# Reddit's web pages are served behind a JS bot-check ("Please wait for
+# verification"), so the generic HTML extractors only ever see the
+# interstitial. Reddit's public JSON endpoint (append `.json` to a post
+# permalink) returns the post body and comments as structured data, which we
+# render to Markdown directly.
+# ============================================================================
+
+# Reddit aggressively bot-blocks. A full browser-like header set gets past the
+# block more often than a minimal one; a descriptive token is appended to the
+# UA per Reddit's API etiquette.
+REDDIT_HEADERS = {
+    **DEFAULT_HEADERS,
+    'User-Agent': DEFAULT_HEADERS['User-Agent'] + f' epub2md/{CONVERTER_VERSION}',
+    'Accept': 'application/json, text/plain, */*',
+}
+
+# Hosts to try, in order. old.reddit.com is often less aggressively guarded.
+REDDIT_JSON_HOSTS = ['www.reddit.com', 'old.reddit.com']
+
+
+def is_reddit_url(url: str) -> bool:
+    """Return True if the URL points at reddit.com (or redd.it)."""
+    host = urlparse(url).netloc.lower()
+    return (
+        host == 'reddit.com' or host.endswith('.reddit.com')
+        or host == 'redd.it' or host.endswith('.redd.it')
+    )
+
+
+def _resolve_reddit_permalink(url: str) -> str:
+    """Follow redirects (e.g. /s/ share links) to the canonical comments URL."""
+    if not REQUESTS_AVAILABLE:
+        return url
+    try:
+        resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=20, allow_redirects=True)
+        return resp.url
+    except requests.exceptions.RequestException:
+        return url
+
+
+def fetch_reddit_json(url: str) -> tuple[Optional[Any], Optional[str]]:
+    """
+    Fetch a Reddit post's JSON (post + comments).
+
+    Returns:
+        Tuple of (parsed_json, error_message).
+    """
+    if not REQUESTS_AVAILABLE:
+        return None, "requests library not installed"
+
+    parsed = urlparse(url)
+    # Share links (/r/<sub>/s/<id>) and other shapes redirect to a /comments/ URL.
+    if '/comments/' not in parsed.path:
+        parsed = urlparse(_resolve_reddit_permalink(url))
+        if '/comments/' not in parsed.path:
+            return None, "URL is not a Reddit post/comments page"
+
+    path = parsed.path.rstrip('/')
+    if not path.endswith('.json'):
+        path += '.json'
+
+    # A shared session lets cookies set on the first hit carry into later tries.
+    session = requests.Session()
+    last_status = None
+    for host in REDDIT_JSON_HOSTS:
+        json_url = urlunparse(('https', host, path, '', 'raw_json=1', ''))
+        try:
+            resp = session.get(json_url, headers=REDDIT_HEADERS, timeout=30)
+        except requests.exceptions.RequestException as e:
+            last_status = str(e)
+            continue
+
+        last_status = resp.status_code
+        if resp.status_code == 200:
+            try:
+                return resp.json(), None
+            except ValueError:
+                # Got HTML (bot-check interstitial) instead of JSON — try next host.
+                continue
+        # 403/429/5xx → try the next host.
+
+    return None, (
+        f"HTTP {last_status}: Reddit blocked the request. Since their 2023 API lockdown, "
+        "Reddit blocks unauthenticated/automated access — this often fails even from "
+        "residential IPs, and always from datacenter/VPN IPs. Try disabling any VPN and "
+        "retrying; if it still fails, Reddit is refusing non-browser requests for this post."
+    )
+
+
+def _render_reddit_comments(children: list, max_comments: int = 40, max_depth: int = 4) -> list[str]:
+    """Render Reddit comment trees as nested-blockquote Markdown blocks."""
+    rendered: list[str] = []
+    count = 0
+
+    def walk(children: list, depth: int) -> None:
+        nonlocal count
+        for child in children or []:
+            if count >= max_comments:
+                return
+            if child.get('kind') != 't1':
+                continue
+            data = child.get('data', {})
+            body = (data.get('body') or '').strip()
+            author = data.get('author') or '[deleted]'
+            score = data.get('score')
+            if body and body not in ('[deleted]', '[removed]'):
+                count += 1
+                prefix = '> ' * (depth + 1)
+                score_str = f" ({score} points)" if isinstance(score, int) else ""
+                quoted = '\n'.join(f"{prefix}{line}" for line in body.split('\n'))
+                rendered.append(f"{prefix}**u/{author}**{score_str}\n{prefix}\n{quoted}")
+            if depth < max_depth:
+                replies = data.get('replies')
+                if isinstance(replies, dict):
+                    walk(replies.get('data', {}).get('children', []), depth + 1)
+
+    walk(children, 0)
+    return rendered
+
+
+def reddit_json_to_markdown(data: Any) -> tuple[Optional[str], dict[str, Any], list[str]]:
+    """
+    Convert parsed Reddit post JSON into (markdown_content, metadata, image_urls).
+
+    Pure function (no network) so it can be unit-tested with fixture data.
+    Returns (None, {}, []) if the JSON isn't a recognizable post listing.
+    """
+    try:
+        post = data[0]['data']['children'][0]['data']
+    except (KeyError, IndexError, TypeError):
+        return None, {}, []
+
+    title = post.get('title', 'Reddit Post')
+    author = post.get('author', '[deleted]')
+    subreddit = post.get('subreddit_name_prefixed', '')
+    score = post.get('score')
+    num_comments = post.get('num_comments')
+    selftext = (post.get('selftext') or '').strip()
+    link_url = post.get('url_overridden_by_dest') or post.get('url') or ''
+    is_self = post.get('is_self', True)
+
+    # Store the bare username for clean filenames/frontmatter; the "u/" prefix
+    # is shown in the rendered body instead.
+    metadata: dict[str, Any] = {
+        'title': title,
+        'author': author,
+        'source_name': 'Reddit',
+    }
+    created = post.get('created_utc')
+    if created:
+        try:
+            metadata['publication_date'] = datetime.fromtimestamp(
+                created, tz=timezone.utc
+            ).strftime('%Y-%m-%d')
+        except (ValueError, OSError, OverflowError):
+            pass
+
+    # ===== Collect image URLs (direct image link + gallery) =====
+    image_urls: list[str] = []
+    is_image_link = bool(re.search(r'\.(jpg|jpeg|png|gif|webp)(\?|$)', link_url, re.I))
+    if is_image_link:
+        image_urls.append(link_url)
+    media_metadata = post.get('media_metadata')
+    if isinstance(media_metadata, dict):
+        for media in media_metadata.values():
+            source = (media or {}).get('s', {})
+            img = source.get('u') or source.get('gif')
+            if img:
+                image_urls.append(html.unescape(img))
+
+    # ===== Build Markdown body =====
+    parts = [f"# {title}", ""]
+    meta_bits = []
+    if subreddit:
+        meta_bits.append(f"Posted in {subreddit}")
+    meta_bits.append(f"by u/{author}")
+    if isinstance(score, int):
+        meta_bits.append(f"{score} points")
+    if isinstance(num_comments, int):
+        meta_bits.append(f"{num_comments} comments")
+    parts.append("*" + " • ".join(meta_bits) + "*")
+    parts.append("")
+
+    if not is_self and link_url and not is_image_link:
+        parts.append(f"**Link:** {link_url}")
+        parts.append("")
+    if selftext:
+        parts.append(selftext)
+        parts.append("")
+
+    comments_children = data[1].get('data', {}).get('children', []) if len(data) > 1 else []
+    rendered_comments = _render_reddit_comments(comments_children)
+    if rendered_comments:
+        parts.append("## Comments")
+        parts.append("")
+        parts.append("\n\n".join(rendered_comments))
+
+    return "\n".join(parts).strip(), metadata, image_urls
+
+
+def convert_reddit_to_markdown(
     url: str,
     output_dir: str,
     download_images: bool = True,
     image_subdir: str = 'article_images'
-) -> Tuple[bool, str, Optional[str]]:
+) -> tuple[bool, str, Optional[str]]:
+    """Convert a Reddit post (via the JSON API) to an AI-optimized Markdown file."""
+    print(f"\n{'='*60}")
+    print(f"Converting: {url}")
+    print('='*60)
+    print("\n[Reddit Detected] Using Reddit's JSON API...")
+
+    data, error = fetch_reddit_json(url)
+    if error:
+        # The plain JSON fetch is frequently blocked by Reddit's bot-check. Fall
+        # back to a real browser (nodriver) that can pass the verification gate.
+        # Skip the fallback for structural errors a browser can't fix.
+        structural = 'not a Reddit post' in error or 'requests library' in error
+        if REDDIT_BROWSER_AVAILABLE and not structural:
+            print(f"      Direct fetch blocked ({error.split(':')[0]}). Trying real browser...")
+            data, browser_error = fetch_reddit_json_via_browser(url)
+            if browser_error:
+                return False, (
+                    f"Failed to fetch Reddit content. Direct: {error} | "
+                    f"Browser fallback: {browser_error}"
+                ), None
+        elif not REDDIT_BROWSER_AVAILABLE and not structural:
+            return False, (
+                f"Failed to fetch Reddit content: {error} "
+                "Tip: install the real-browser fallback with `pip install nodriver` "
+                "to get past Reddit's verification."
+            ), None
+        else:
+            return False, f"Failed to fetch Reddit content: {error}", None
+
+    content, metadata, image_urls = reddit_json_to_markdown(data)
+    if not content:
+        return False, "Could not parse Reddit post JSON", None
+
+    print(f"      Title: {metadata.get('title', 'Not found')}")
+    print(f"      Author: {metadata.get('author', 'Not found')}")
+    print(f"      Extracted {len(content):,} characters")
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # ===== Images =====
+    if download_images and image_urls:
+        print(f"\n[Images] Downloading {len(image_urls)} image(s)...")
+        article_slug = sanitize_filename(metadata.get('title', 'reddit')[:50])
+        article_image_dir = f"{image_subdir}/{article_slug}"
+        image_dir = output_path / article_image_dir
+        image_dir.mkdir(parents=True, exist_ok=True)
+        base_name = sanitize_filename(f"{metadata.get('author', 'Reddit')} - {metadata.get('title', 'Post')[:40]} - Reddit")
+        downloaded = 0
+        for idx, img_url in enumerate(image_urls, 1):
+            local_name, _err = download_image(img_url, image_dir, base_name, idx)
+            if local_name:
+                downloaded += 1
+                new_ref = f"{article_image_dir}/{local_name}"
+                if img_url in content:
+                    content = content.replace(img_url, new_ref)
+                else:
+                    content += f"\n\n![Figure {idx}]({new_ref})\n"
+        print(f"      Downloaded {downloaded}/{len(image_urls)} image(s)")
+
+    # ===== Clean, frontmatter, TOC, write (mirrors the generic path) =====
+    content = clean_markdown_for_rag(content)
+    reading_time = calculate_reading_time(content)
+
+    toc = extract_toc_from_markdown(content)
+    has_toc = len(toc) >= 3
+    frontmatter = generate_yaml_frontmatter(metadata, url, reading_time, None, has_toc)
+
+    content_parts = [frontmatter, ""]
+    if has_toc:
+        content_parts.append(format_toc_for_markdown(toc, metadata.get('title')))
+        content_parts.append("")
+    content_parts.append(content)
+    final_content = "\n".join(content_parts)
+
+    filename = create_output_filename(metadata, url)
+    filepath = output_path / filename
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(final_content)
+
+    print(f"\n{'='*60}")
+    print("SUCCESS!")
+    print(f"Output: {filepath}")
+    print('='*60)
+    return True, f"Successfully converted to: {filename}", str(filepath)
+
+
+def convert_url_to_markdown(
+    url: str,
+    output_dir: str,
+    download_images: bool = True,
+    image_subdir: str = 'article_images',
+    page_count: int = 1
+) -> tuple[bool, str, Optional[str]]:
     """
     Convert a web URL to an AI-optimized Markdown file.
 
@@ -1876,10 +2303,19 @@ def convert_url_to_markdown(
         output_dir: Directory to save the output file
         download_images: Whether to download images
         image_subdir: Subdirectory name for images
+        page_count: Number of paginated pages to capture, starting from the
+            page number in the URL. When > 1 and the URL contains a pagination
+            parameter (e.g. ?page=2), the converter fetches that page and the
+            following ``page_count - 1`` pages, combining them into one file.
 
     Returns:
         Tuple of (success, message, output_filepath)
     """
+    # Reddit pages are served behind a JS bot-check, so route them through
+    # Reddit's JSON API instead of the generic HTML extractors.
+    if is_reddit_url(url):
+        return convert_reddit_to_markdown(url, output_dir, download_images, image_subdir)
+
     # Check dependencies
     deps_ok, missing = check_dependencies()
     if not deps_ok:
@@ -1899,7 +2335,7 @@ def convert_url_to_markdown(
         if MEDIUM_SUPPORT_AVAILABLE:
             medium_selenium_html, selenium_error = fetch_medium_with_selenium(url)
             if medium_selenium_html:
-                print(f"      ✓ Got authenticated content via Selenium")
+                print("      ✓ Got authenticated content via Selenium")
             else:
                 print(f"      Selenium fetch failed: {selenium_error}")
                 print("      Falling back to regular fetch (may be truncated)...")
@@ -1935,7 +2371,7 @@ def convert_url_to_markdown(
                         print(f"      Trafilatura fetch got {len(better_html):,} bytes with better content")
                         html_content = better_html
                     else:
-                        print(f"      Trafilatura fetch didn't improve content")
+                        print("      Trafilatura fetch didn't improve content")
                 else:
                     print("      Trafilatura fetch returned no content")
             except Exception as e:
@@ -2003,13 +2439,48 @@ def convert_url_to_markdown(
 
     print(f"      Extracted {len(content):,} characters")
 
+    # ===== MULTI-PAGE / PAGINATION HANDLING =====
+    # Keep every page's HTML so images on later pages are also captured below.
+    page_htmls = [html_content]
+    if page_count and page_count > 1:
+        pagination = detect_pagination_param(url)
+        if pagination:
+            param, start_page = pagination
+            end_page = start_page + page_count - 1
+            print(f"\n[Pagination] Capturing {page_count} pages "
+                  f"(?{param}={start_page} … ?{param}={end_page})")
+            for page_num in range(start_page + 1, end_page + 1):
+                page_url = build_page_url(url, param, page_num)
+                print(f"      Fetching page {page_num}: {page_url}")
+                page_html, page_err = fetch_url(page_url)
+                if page_err or not page_html:
+                    print(f"      Warning: failed to fetch page {page_num}: {page_err}")
+                    continue
+                page_content, _ = extract_article_content(page_html, page_url)
+                if not page_content:
+                    print(f"      Warning: no article content found on page {page_num}")
+                    continue
+                page_htmls.append(page_html)
+                content += f"\n\n---\n\n{page_content}"
+                print(f"      Page {page_num}: added {len(page_content):,} characters")
+        else:
+            print("      Note: no pagination parameter found in URL; "
+                  "capturing single page only")
+
     # Step 4: Handle images
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     if download_images:
         print("\n[4/6] Processing images...")
-        all_images = extract_images(html_content, url)
+        # Gather images from every captured page, de-duplicating by URL.
+        all_images = []
+        seen_image_urls = set()
+        for page_html in page_htmls:
+            for img in extract_images(page_html, url):
+                if img['url'] not in seen_image_urls:
+                    seen_image_urls.add(img['url'])
+                    all_images.append(img)
 
         # Filter out obvious non-article images (tiny icons, tracking pixels, avatars)
         # but be inclusive — trafilatura strips image URLs from extracted text,
@@ -2117,7 +2588,7 @@ def convert_url_to_markdown(
 
     file_size = filepath.stat().st_size / 1024
     print(f"\n{'='*60}")
-    print(f"SUCCESS!")
+    print("SUCCESS!")
     print(f"Output: {filepath}")
     print(f"Size: {file_size:.1f} KB")
     print('='*60)
@@ -2147,14 +2618,38 @@ Examples:
                         help='Skip downloading images')
     parser.add_argument('--image-dir', default='article_images',
                         help='Subdirectory for images (default: article_images)')
+    parser.add_argument('--pages', type=int, default=None,
+                        help='Number of paginated pages to capture, starting from the '
+                             'page number in the URL (e.g. a URL ending in ?page=2 with '
+                             '--pages 3 captures pages 2, 3, and 4). When omitted and a '
+                             'pagination parameter is detected, you will be prompted.')
 
     args = parser.parse_args()
+
+    # Resolve how many pages to capture.
+    page_count = args.pages
+    if page_count is None:
+        pagination = detect_pagination_param(args.url)
+        if pagination and sys.stdin.isatty():
+            param, start_page = pagination
+            print(f"\nDetected pagination parameter '?{param}={start_page}' in the URL.")
+            try:
+                resp = input(
+                    f"How many pages to capture starting from page {start_page}? [1]: "
+                ).strip()
+                page_count = int(resp) if resp else 1
+            except (ValueError, EOFError):
+                page_count = 1
+        else:
+            page_count = 1
+    page_count = max(1, page_count)
 
     success, message, filepath = convert_url_to_markdown(
         url=args.url,
         output_dir=args.output,
         download_images=not args.no_images,
-        image_subdir=args.image_dir
+        image_subdir=args.image_dir,
+        page_count=page_count
     )
 
     if success:

@@ -25,6 +25,8 @@ jobs:
         python-version: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -38,22 +40,28 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Verify version import
-        run: python -c "from version import __version__; print(f'Version: {__version__}')"
+        run: |
+          python -c "from version import __version__; print(f'Version: {__version__}')"
 
       - name: Verify EPUB converter imports
-        run: python -c "from epub_to_md_converter import process_folder, check_pandoc_installed; print('EPUB converter OK')"
+        run: |
+          python -c "from epub_to_md_converter import process_folder, check_pandoc_installed; print('EPUB converter OK')"
 
       - name: Verify HTML converter imports
-        run: python -c "from html_to_md_converter import convert_url_to_markdown; print('HTML converter OK')"
+        run: |
+          python -c "from html_to_md_converter import convert_url_to_markdown; print('HTML converter OK')"
 
       - name: Verify PDF converter imports
-        run: python -c "from pdf_to_md_converter import convert_pdf_to_markdown; print('PDF converter OK')"
+        run: |
+          python -c "from pdf_to_md_converter import convert_pdf_to_markdown; print('PDF converter OK')"
 
       - name: Verify GUI imports
-        run: python -c "from gui import app; print('GUI OK')"
+        run: |
+          python -c "from gui import app; print('GUI OK')"
 
       - name: Check Pandoc is available
-        run: python -c "from epub_to_md_converter import check_pandoc_installed; assert check_pandoc_installed(), 'Pandoc not found'"
+        run: |
+          python -c "from epub_to_md_converter import check_pandoc_installed; assert check_pandoc_installed(), 'Pandoc not found'"
 
       - name: Test CLI help flags
         run: |
@@ -71,3 +79,36 @@ jobs:
           assert ev == hv == pv == __version__, f'Version mismatch: epub={ev}, html={hv}, pdf={pv}, version.py={__version__}'
           print(f'All modules report version {__version__}')
           "
+
+      - name: Install test dependencies
+        run: pip install pytest "anthropic>=0.69"
+
+      - name: Fetch base for baseline-tamper guard
+        run: git fetch origin main:refs/remotes/origin/main || true
+
+      # Regression suite is the auto-merge gate. Corpus tests skip (no EPUBs in CI);
+      # the synthetic end-to-end conversion + oracle + tamper guard run for real.
+      - name: Run regression suite
+        run: pytest -q
+
+  # Defense-in-depth: stop an autonomous self-improvement PR from editing CI /
+  # workflows (it must not be able to widen its own powers). Only enforced for
+  # branches the coder Action creates (self-improve/*); human PRs are unaffected.
+  scope-guard:
+    if: github.event_name == 'pull_request' && (startsWith(github.head_ref, 'claude/') || startsWith(github.head_ref, 'self-improve/'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Enforce changed-path allowlist
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1 || true
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "Changed files:"; echo "$changed"
+          blocked=$(echo "$changed" | grep -E '^\.github/' || true)
+          if [ -n "$blocked" ]; then
+            echo "::error::Self-improvement PR touches protected CI/workflow paths:"
+            echo "$blocked"
+            exit 1
+          fi

@@ -28,7 +28,9 @@ classifiers = [
 ]
 dependencies = [
     "flask>=2.0.0",
+    "pywebview>=5.0",
     "requests>=2.28.0",
+    "brotli>=1.0.9",
     "trafilatura>=1.6.0",
     "beautifulsoup4>=4.11.0",
     "readability-lxml>=0.8.1",
@@ -47,8 +49,20 @@ medium = [
 ocr = [
     "pytesseract>=0.3.10",
 ]
+reddit = [
+    # Real-browser fallback to get past Reddit's "Please wait for verification"
+    # bot-check. nodriver is the modern successor to undetected-chromedriver.
+    "nodriver>=0.32",
+]
+selfimprove = [
+    "anthropic>=0.69",
+]
+dev = [
+    "pytest>=8",
+    "anthropic>=0.69",
+]
 all = [
-    "epub2md[medium,ocr]",
+    "epub2md[medium,ocr,reddit,selfimprove]",
 ]
 
 [project.urls]
@@ -73,7 +87,13 @@ py-modules = [
     "pdf_to_md_converter",
     "medium_scraper",
     "gui",
+    "self_improve",
+    "epub_text",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
