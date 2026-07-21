@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -46,11 +47,27 @@ MAX_OCCURRENCES = 2                         # refiling cap before escalating to 
 SINGLE_PASS_CHARS = 120_000                # below this, judge the whole book in one call
 MAX_CHUNKS_PER_BOOK = 12
 JUDGE_MAX_TOKENS = 8000
+CLI_TIMEOUT_S = 600                        # per-chunk wall clock for the claude -p engine
 
 HISTORY_PATH = Path(os.path.expanduser("~")) / ".epub2md_eval_history.json"
 ISSUE_LABEL = "self-improvement"
 HOLD_LABEL = "self-improvement-hold"
 SIGNATURE_MARKER = "si-signature"
+
+
+def _select_engine() -> str:
+    """Pick the judge engine: 'api' | 'cli' | 'none'.
+
+    Precedence: EPUB2MD_JUDGE_ENGINE override > API key present > `claude` CLI on PATH > none.
+    """
+    forced = os.environ.get("EPUB2MD_JUDGE_ENGINE", "").lower()
+    if forced in ("api", "cli"):
+        return forced
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return "api"
+    if shutil.which("claude"):
+        return "cli"
+    return "none"
 
 
 # --------------------------------------------------------------------------- #
@@ -235,10 +252,10 @@ def _md_slice(md_text: str, index: int, total: int, pad: int = 1500) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# The judge call (lazy anthropic import)
+# The judge engines (API SDK lazy-imported; claude CLI via subprocess)
 # --------------------------------------------------------------------------- #
 
-def _judge_chunk(client, model: str, reference_text: str, metrics_block: str, md_text: str) -> JudgeReport:
+def _judge_via_api(client, model: str, reference_text: str, metrics_block: str, md_text: str) -> JudgeReport:
     system = [{"type": "text", "text": RUBRIC}]
     messages = [{
         "role": "user",
@@ -264,11 +281,57 @@ def _judge_chunk(client, model: str, reference_text: str, metrics_block: str, md
     return resp.parsed_output
 
 
-def run_judge(epub_path: str, md_path: str, signals: dict, model: str, logger=print) -> list:
-    """Return a list of JudgeReport (one per chunk). Raises on API/auth errors."""
-    import anthropic  # lazy: only the judge needs the SDK
+def _judge_via_claude_cli(model: str, reference_text: str, metrics_block: str, md_text: str) -> JudgeReport:
+    """Judge one chunk by driving `claude -p` (subscription OAuth). Raises on any failure."""
+    import tempfile
 
-    client = anthropic.Anthropic()
+    schema = json.dumps(JudgeReport.model_json_schema())
+    prompt = (
+        f"ORIGINAL EPUB REFERENCE:\n{reference_text}\n\n"
+        f"DETERMINISTIC METRICS:\n{metrics_block}\n\n"
+        f"PRODUCED MARKDOWN:\n{md_text}\n\n"
+        f"{QUESTION}"
+    )
+    cmd = [
+        "claude", "-p",
+        "--output-format", "json",
+        "--json-schema", schema,
+        "--system-prompt", RUBRIC,
+        "--model", model,                  # full names accepted: claude-opus-4-8 / claude-sonnet-4-6
+        "--tools", "",                     # pure text comparison; no tool use
+        "--no-session-persistence",
+        "--effort", "high",                # mirrors output_config={"effort": "high"}
+        "--setting-sources", "user",       # ignore project settings/CLAUDE.md
+    ]
+    result = subprocess.run(
+        cmd, input=prompt, capture_output=True, text=True,
+        timeout=CLI_TIMEOUT_S, cwd=tempfile.gettempdir(),  # neutral cwd: never ingest repo context
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"claude CLI exited {result.returncode}: {result.stderr.strip()[-500:]}")
+    envelope = json.loads(result.stdout)
+    if envelope.get("is_error") or envelope.get("subtype") != "success":
+        raise RuntimeError(f"claude CLI error result: subtype={envelope.get('subtype')}")
+    payload = envelope.get("structured_output")
+    if payload is None:                    # older CLI / schema tool not engaged
+        payload = json.loads(envelope.get("result") or "")
+    return JudgeReport.model_validate(payload)
+
+
+def _judge_chunk(engine: str, client, model: str, reference_text: str, metrics_block: str, md_text: str) -> JudgeReport:
+    if engine == "cli":
+        return _judge_via_claude_cli(model, reference_text, metrics_block, md_text)
+    return _judge_via_api(client, model, reference_text, metrics_block, md_text)
+
+
+def run_judge(epub_path: str, md_path: str, signals: dict, model: str,
+              engine: str = "api", logger=print) -> list:
+    """Return a list of JudgeReport (one per chunk). Raises on API/auth errors."""
+    client = None
+    if engine == "api":
+        import anthropic  # lazy: only the API engine needs the SDK
+
+        client = anthropic.Anthropic()
     chapters = extract_reference_text(epub_path)
     metrics_block = json.dumps(signals, sort_keys=True, default=str)
     with open(md_path, encoding="utf-8") as f:
@@ -284,7 +347,7 @@ def run_judge(epub_path: str, md_path: str, signals: dict, model: str, logger=pr
     if total_chars <= SINGLE_PASS_CHARS:
         reference = "\n\n".join(f"## {c.title or c.idref}\n{c.text}" for c in chapters)
         logger(f"self-improvement: judging in a single pass ({total_chars} ref chars).")
-        reports.append(_judge_chunk(client, model, reference, metrics_block, md_text))
+        reports.append(_judge_chunk(engine, client, model, reference, metrics_block, md_text))
         return reports
 
     sampled = _sample_chapters(chapters, MAX_CHUNKS_PER_BOOK)
@@ -293,7 +356,7 @@ def run_judge(epub_path: str, md_path: str, signals: dict, model: str, logger=pr
         reference = f"## {chapter.title or chapter.idref}\n{chapter.text}"
         md_chunk = _md_slice(md_text, index, len(chapters))
         try:
-            reports.append(_judge_chunk(client, model, reference, metrics_block, md_chunk))
+            reports.append(_judge_chunk(engine, client, model, reference, metrics_block, md_chunk))
         except Exception as e:  # one bad chunk shouldn't kill the whole run
             logger(f"self-improvement: chunk {index} failed: {e}")
     return reports
@@ -438,21 +501,24 @@ def evaluate_conversion(epub_path: str, md_path: str, *, model: str | None = Non
     model = model if model in VALID_MODELS else DEFAULT_MODEL
     book_title = Path(epub_path).stem
 
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        logger("self-improvement: ANTHROPIC_API_KEY not set; skipping evaluation.")
-        return {"status": "skipped", "reason": "no_api_key", "book": book_title}
+    engine = _select_engine()
+    if engine == "none":
+        logger("self-improvement: no ANTHROPIC_API_KEY and no `claude` CLI on PATH; "
+               "set a key or install Claude Code to enable the judge. Skipping.")
+        return {"status": "skipped", "reason": "no_judge_engine", "book": book_title, "engine": "none"}
 
     signals = collect_quality_signals(epub_path, md_path)
     history = load_history()
 
     try:
-        reports = run_judge(epub_path, md_path, signals, model, logger=logger)
+        logger(f"self-improvement: judging via {engine} engine (model {model}).")
+        reports = run_judge(epub_path, md_path, signals, model, engine=engine, logger=logger)
     except Exception as e:  # auth, rate limit, network -> fail closed
         logger(f"self-improvement: judge failed ({e}); filing nothing.")
         history["evals"].append({"ts": _today(), "book": book_title, "model": model,
-                                 "status": "judge_error", "error": str(e)})
+                                 "engine": engine, "status": "judge_error", "error": str(e)})
         save_history(history)
-        return {"status": "error", "reason": str(e), "book": book_title}
+        return {"status": "error", "reason": str(e), "book": book_title, "engine": engine}
 
     findings = merge_findings(reports)
     logger(f"self-improvement: {len(findings)} filable finding(s) after filtering.")
@@ -460,7 +526,7 @@ def evaluate_conversion(epub_path: str, md_path: str, *, model: str | None = Non
 
     filed = [o for o in outcomes if o["action"] in ("filed", "dry_run")]
     history["evals"].append({
-        "ts": _today(), "book": book_title, "model": model, "status": "ok",
+        "ts": _today(), "book": book_title, "model": model, "engine": engine, "status": "ok",
         "metrics": {"optimization_score": signals["optimization_score"],
                     "heading_count": signals["heading_count"]},
         "reference": reference_summary(extract_reference_text(epub_path)),
@@ -469,7 +535,7 @@ def evaluate_conversion(epub_path: str, md_path: str, *, model: str | None = Non
     })
     save_history(history)
     return {
-        "status": "ok", "book": book_title, "model": model,
+        "status": "ok", "book": book_title, "model": model, "engine": engine,
         "findings": len(findings), "filed": len(filed),
         "outcomes": outcomes,
     }

@@ -608,7 +608,9 @@
                     <div class="help-text">
                         After each conversion, an AI judge compares the original EPUB to the Markdown and
                         files GitHub issues for quality problems, which an automated coder fixes via pull
-                        request. Uses your <code>ANTHROPIC_API_KEY</code> and consumes tokens.
+                        request. Uses your <code>ANTHROPIC_API_KEY</code> if set; otherwise falls back to the
+                        local <code>claude</code> CLI (Claude Pro/Max subscription). Consumes tokens /
+                        subscription usage.
                     </div>
                     <div id="self-improve-options" style="display: none; margin-top: 10px;">
                         <label for="self-improve-model">Judge model</label>
@@ -616,6 +618,25 @@
                             <option value="claude-opus-4-8">Claude Opus 4.8 (best quality)</option>
                             <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (lower cost)</option>
                         </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="rag-distill-enabled" onchange="onRagDistillToggle()">
+                        <label for="rag-distill-enabled">🧠 Create RAG-optimized knowledge file (Gemini API — small cost per book)</label>
+                    </div>
+                    <div id="rag-distill-options" style="display:none; margin-top:10px;">
+                        <select id="rag-distill-quality" onchange="savePreferences()">
+                            <option value="standard" selected>Standard — cheapest, recommended (~$0.30/book)</option>
+                            <option value="max">Max — frontier synthesis, ~3× cost</option>
+                        </select>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="rag-accuracy-critical" onchange="savePreferences()">
+                            <label for="rag-accuracy-critical">Accuracy Critical (tables/figures copied verbatim + numerals verified)</label>
+                        </div>
+                        <div class="help-text">Writes a companion "*.rag.md" beside the full conversion (never replaces it).
+                        Needs a Gemini API key: env GEMINI_API_KEY or file ~/.epub2md_gemini_key.</div>
                     </div>
                 </div>
 
@@ -641,12 +662,25 @@
                 </div>
             </div>
 
+            <div id="rag-distill-container" class="progress-container">
+                <div class="progress-header">
+                    <h3>🧠 RAG Knowledge Distillation</h3>
+                    <span id="rag-distill-badge" class="status-badge status-running">
+                        <span class="spinner"></span> Distilling...
+                    </span>
+                </div>
+                <div class="progress-log" id="rag-distill-log">
+                    <p>Waiting for conversion to finish...</p>
+                </div>
+            </div>
+
             <div id="self-improve-container" class="progress-container">
                 <div class="progress-header">
                     <h3>🤖 Self-Improvement Evaluation</h3>
                     <span id="self-improve-badge" class="status-badge status-running">
                         <span class="spinner"></span> Evaluating...
                     </span>
+                    <span id="self-improve-engine" class="help-text" style="display:none;"></span>
                 </div>
                 <div class="progress-log" id="self-improve-log">
                     <p>Waiting for conversion to finish...</p>
@@ -786,6 +820,14 @@
                         Uses stricter quality threshold (93% vs 85%) and may try multiple extraction tools
                     </div>
 
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="rag-distill-enabled-pdf" onchange="savePreferences()">
+                        <label for="rag-distill-enabled-pdf">🧠 Create RAG-optimized knowledge file (Gemini API — small cost per book)</label>
+                    </div>
+                    <div class="help-text" style="margin-top: -10px; margin-bottom: 15px;">
+                        Uses the quality set on the EPUB tab. 'Accuracy Critical' above also applies to the companion.
+                    </div>
+
                     <button type="submit" class="btn btn-primary" id="convert-pdf-btn">
                         Convert PDF to Markdown
                     </button>
@@ -807,6 +849,18 @@
                         <p>Starting conversion...</p>
                     </div>
                     <div id="pdf-result-message"></div>
+                </div>
+
+                <div id="rag-distill-container-pdf" class="progress-container">
+                    <div class="progress-header">
+                        <h3>🧠 RAG Knowledge Distillation</h3>
+                        <span id="rag-distill-badge-pdf" class="status-badge status-running">
+                            <span class="spinner"></span> Distilling...
+                        </span>
+                    </div>
+                    <div class="progress-log" id="rag-distill-log-pdf">
+                        <p>Waiting for conversion to finish...</p>
+                    </div>
                 </div>
 
                 <div class="features">
@@ -921,6 +975,14 @@
                 document.getElementById('self-improvement-enabled').checked = siEnabled;
                 document.getElementById('self-improve-model').value = prefs.self_improve_model || 'claude-opus-4-8';
                 document.getElementById('self-improve-options').style.display = siEnabled ? 'block' : 'none';
+
+                // RAG distill toggles + quality
+                const ragEnabled = !!prefs.rag_distill_enabled;
+                document.getElementById('rag-distill-enabled').checked = ragEnabled;
+                document.getElementById('rag-distill-options').style.display = ragEnabled ? 'block' : 'none';
+                document.getElementById('rag-distill-quality').value = prefs.rag_distill_quality || 'standard';
+                document.getElementById('rag-accuracy-critical').checked = !!prefs.rag_accuracy_critical_epub;
+                document.getElementById('rag-distill-enabled-pdf').checked = !!prefs.rag_distill_enabled_pdf;
             } catch (error) {
                 console.error('Error loading preferences:', error);
             }
@@ -937,7 +999,11 @@
                         url_output_folder: document.getElementById('url-output-folder').value,
                         pdf_output_folder: document.getElementById('pdf-output-folder').value,
                         self_improvement_enabled: document.getElementById('self-improvement-enabled').checked,
-                        self_improve_model: document.getElementById('self-improve-model').value
+                        self_improve_model: document.getElementById('self-improve-model').value,
+                        rag_distill_enabled: document.getElementById('rag-distill-enabled').checked,
+                        rag_distill_enabled_pdf: document.getElementById('rag-distill-enabled-pdf').checked,
+                        rag_distill_quality: document.getElementById('rag-distill-quality').value,
+                        rag_accuracy_critical_epub: document.getElementById('rag-accuracy-critical').checked
                     })
                 });
             } catch (error) {
@@ -952,11 +1018,69 @@
             savePreferences();
         }
 
+        // Toggle the RAG distill options panel and persist the setting.
+        function onRagDistillToggle() {
+            const enabled = document.getElementById('rag-distill-enabled').checked;
+            document.getElementById('rag-distill-options').style.display = enabled ? 'block' : 'none';
+            savePreferences();
+        }
+
+        // Poll the RAG distill status (kicked off after conversion) into the
+        // suffix-matched panel: '' = EPUB tab, '-pdf' = PDF tab.
+        async function pollRagDistill(suffix) {
+            try {
+                const response = await fetch('/rag_distill_status');
+                const data = await response.json();
+
+                const log = document.getElementById('rag-distill-log' + suffix);
+                if (data.progress && data.progress.length) {
+                    log.innerHTML = '';
+                    data.progress.forEach(line => {
+                        const p = document.createElement('p');
+                        p.textContent = line;
+                        log.appendChild(p);
+                    });
+                    log.scrollTop = log.scrollHeight;
+                }
+
+                const badge = document.getElementById('rag-distill-badge' + suffix);
+                if (data.completed) {
+                    badge.className = 'status-badge status-complete';
+                    const lines = data.progress || [];
+                    const problem = lines.slice().reverse().find(
+                        l => /skipped|unavailable|failed|error|abort/i.test(l));
+                    if (problem && !data.processed) {
+                        badge.innerHTML = '⚠ Skipped/failed — see log';
+                    } else if (data.estimate_only) {
+                        badge.innerHTML = '✓ Done — tokens only (unpriced model)';
+                    } else {
+                        badge.innerHTML = '✓ Done — ' + (data.calls || 0) + ' calls, $' + (data.cost_usd || 0).toFixed(4);
+                    }
+                } else {
+                    badge.innerHTML = '<span class="spinner"></span> Distilling ' +
+                        (data.chunk || 0) + '/' + (data.chunks_total || 0) +
+                        '… $' + (data.cost_usd || 0).toFixed(4);
+                    setTimeout(() => pollRagDistill(suffix), 1000);
+                }
+            } catch (error) {
+                console.error('Error polling RAG distill status:', error);
+                setTimeout(() => pollRagDistill(suffix), 1500);
+            }
+        }
+
         // Poll the self-improvement evaluation status (kicked off after conversion).
         async function pollSelfImprove() {
             try {
                 const response = await fetch('/self_improve_status');
                 const data = await response.json();
+
+                const engineEl = document.getElementById('self-improve-engine');
+                if (data.engine) {
+                    engineEl.style.display = 'inline';
+                    engineEl.textContent = data.engine === 'cli'
+                        ? 'Judge: Claude Code CLI (subscription)'
+                        : 'Judge: Anthropic API';
+                }
 
                 const log = document.getElementById('self-improve-log');
                 if (data.progress && data.progress.length) {
@@ -1060,6 +1184,16 @@
                     document.getElementById('status-badge').innerHTML = '✓ Complete';
                     document.getElementById('convert-btn').innerHTML = 'Convert EPUBs to Markdown';
                     document.getElementById('convert-btn').disabled = inputItems.length === 0;
+
+                    // RAG distill runs first after conversion; surface its progress.
+                    if (document.getElementById('rag-distill-enabled').checked) {
+                        const rc = document.getElementById('rag-distill-container');
+                        rc.classList.add('show');
+                        document.getElementById('rag-distill-badge').className = 'status-badge status-running';
+                        document.getElementById('rag-distill-badge').innerHTML = '<span class="spinner"></span> Distilling...';
+                        document.getElementById('rag-distill-log').innerHTML = '<p>Starting distillation...</p>';
+                        pollRagDistill('');
+                    }
 
                     // Self-improvement judge runs after conversion; surface its progress.
                     if (document.getElementById('self-improvement-enabled').checked) {
@@ -1775,6 +1909,16 @@
                                 <code style="display:block; margin-top:5px; padding:8px 12px; background:#f0f0f0; border-radius:4px; word-break:break-all; cursor:pointer; user-select:all;" title="Click to select path">${escapeHtml(data.output_file || '')}</code>
                             </div>
                         `;
+
+                        // RAG distill companion runs after a successful conversion.
+                        if (document.getElementById('rag-distill-enabled-pdf').checked) {
+                            const rc = document.getElementById('rag-distill-container-pdf');
+                            rc.classList.add('show');
+                            document.getElementById('rag-distill-badge-pdf').className = 'status-badge status-running';
+                            document.getElementById('rag-distill-badge-pdf').innerHTML = '<span class="spinner"></span> Distilling...';
+                            document.getElementById('rag-distill-log-pdf').innerHTML = '<p>Starting distillation...</p>';
+                            pollRagDistill('-pdf');
+                        }
                     } else {
                         resultDiv.innerHTML = `
                             <div class="error-message">

@@ -1198,16 +1198,34 @@ def main():
 Examples:
   python epub_to_md_converter.py ./books
   python epub_to_md_converter.py ./books ./converted
+  python epub_to_md_converter.py ./books --rag --rag-quality max
         """
     )
 
     parser.add_argument('input_folder', help='Folder containing EPUB files to convert')
     parser.add_argument('output_folder', nargs='?', default='md processed books',
                         help='Output folder for Markdown files (default: "md processed books")')
+    parser.add_argument('--rag', action='store_true',
+                        help='Generate RAG-optimized .rag.md companion (Gemini API)')
+    parser.add_argument('--rag-quality', choices=['standard', 'max'], default='standard',
+                        help='Distillation quality tier (default: standard)')
+    parser.add_argument('--rag-accuracy-critical', action='store_true',
+                        help='Copy tables/figures verbatim and verify every numeral in the companion')
 
     args = parser.parse_args()
 
-    process_folder(args.input_folder, args.output_folder)
+    pairs = process_folder(args.input_folder, args.output_folder)
+
+    if args.rag and pairs:
+        try:
+            import rag_distill  # lazy — only imported when --rag is set
+            for _src, md in pairs:
+                rag_distill.distill_markdown(md, quality=args.rag_quality,
+                                             accuracy_critical=args.rag_accuracy_critical,
+                                             source_kind='epub')
+                # distill_markdown never raises; its log lines print via default log=print
+        except Exception as e:
+            print(f"RAG distill error (conversion unaffected): {e}")
 
 
 if __name__ == "__main__":

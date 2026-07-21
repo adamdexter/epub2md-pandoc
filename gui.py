@@ -138,8 +138,16 @@ self_improvement_status = {
     'evaluated': 0,
     'total': 0,
     'issues_filed': 0,
+    'engine': None,
     'completed': False,
 }
+
+# Global state for the RAG distillation post-step (mirrors the conversion status).
+rag_distill_status = {'running': False, 'progress': [], 'processed': 0, 'total': 0,
+                      'chunk': 0, 'chunks_total': 0, 'calls': 0,
+                      'input_tokens': 0, 'output_tokens': 0, 'cost_usd': 0.0,
+                      'estimate_only': False, 'lifetime_usd': None,
+                      'source': None, 'completed': False}
 
 
 def _run_self_improvement(pairs, model):
@@ -147,7 +155,7 @@ def _run_self_improvement(pairs, model):
     global self_improvement_status
     self_improvement_status = {
         'running': True, 'progress': [], 'evaluated': 0,
-        'total': len(pairs), 'issues_filed': 0, 'completed': False,
+        'total': len(pairs), 'issues_filed': 0, 'engine': None, 'completed': False,
     }
 
     def log(msg):
@@ -165,6 +173,8 @@ def _run_self_improvement(pairs, model):
     for epub_path, md_path in pairs:
         try:
             result = self_improve.evaluate_conversion(epub_path, md_path, model=model, logger=log)
+            if result.get('engine'):
+                self_improvement_status['engine'] = result['engine']
             self_improvement_status['evaluated'] += 1
             self_improvement_status['issues_filed'] += int(result.get('filed') or 0)
             log(f"Evaluated {os.path.basename(epub_path)}: {result.get('status')} "
@@ -175,6 +185,81 @@ def _run_self_improvement(pairs, model):
     self_improvement_status['running'] = False
     self_improvement_status['completed'] = True
     log(f"Self-improvement complete: {self_improvement_status['issues_filed']} issue(s) filed.")
+
+
+def _run_rag_distill(pairs, prefs, source, accuracy_critical):
+    """Distill each converted Markdown into a .rag.md companion. Self-contained: never raises."""
+    global rag_distill_status
+    rag_distill_status = {
+        'running': True, 'progress': [], 'processed': 0, 'total': len(pairs),
+        'chunk': 0, 'chunks_total': 0, 'calls': 0,
+        'input_tokens': 0, 'output_tokens': 0, 'cost_usd': 0.0,
+        'estimate_only': False, 'lifetime_usd': None,
+        'source': source, 'completed': False,
+    }
+
+    def log(msg):
+        rag_distill_status['progress'].append(str(msg))
+        sys.__stdout__.write(str(msg) + "\n")
+
+    try:
+        import rag_distill
+    except Exception as e:
+        log(f"RAG distill unavailable: pip install 'epub2md[rag]' ({e})")
+        rag_distill_status['running'] = False
+        rag_distill_status['completed'] = True
+        return
+
+    # Accumulate usage across all files in the run.
+    total_usage = rag_distill.UsageTotals()
+    for _src_path, md_path in pairs:
+        try:
+            result = rag_distill.distill_markdown(
+                md_path,
+                quality=prefs.get('rag_distill_quality', 'standard'),
+                accuracy_critical=accuracy_critical,
+                cost_cap_usd=float(prefs.get('rag_distill_cost_cap_usd', 2.0)),
+                source_kind=source,
+                log=log,
+                status=rag_distill_status,
+            )
+            if result.ok:
+                rag_distill_status['processed'] += 1
+            usage = result.usage
+            total_usage.calls += usage.calls
+            total_usage.input_tokens += usage.input_tokens
+            total_usage.output_tokens += usage.output_tokens
+            total_usage.thought_tokens += usage.thought_tokens
+            if usage.estimate_only or usage.cost_usd is None:
+                total_usage.estimate_only = True
+                total_usage.cost_usd = None
+            elif total_usage.cost_usd is not None:
+                total_usage.cost_usd += usage.cost_usd
+            rag_distill_status['calls'] = total_usage.calls
+            rag_distill_status['input_tokens'] = total_usage.input_tokens
+            rag_distill_status['output_tokens'] = total_usage.output_tokens
+            rag_distill_status['cost_usd'] = total_usage.cost_usd if total_usage.cost_usd is not None else 0.0
+            rag_distill_status['estimate_only'] = total_usage.estimate_only
+        except Exception as e:
+            log(f"RAG distill error for {os.path.basename(md_path)}: {e}")
+
+    # Final cost line — the guaranteed surface for "what did this run cost?".
+    try:
+        lifetime = rag_distill.load_usage_ledger().get('lifetime', {})
+        rag_distill_status['lifetime_usd'] = lifetime.get('cost_usd')
+        summary = rag_distill.format_usage_line(total_usage, lifetime)
+    except Exception:
+        summary = f"RAG distill finished: {rag_distill_status['processed']}/{len(pairs)} file(s) distilled."
+    log(summary)
+    # Mirror into the main conversion log so Copy Logs captures the cost line.
+    try:
+        target = pdf_conversion_status if source == 'pdf' else conversion_status
+        target['progress'].append(summary)
+    except Exception:
+        pass
+
+    rag_distill_status['running'] = False
+    rag_distill_status['completed'] = True
 
 
 @app.route('/')
@@ -317,10 +402,18 @@ def convert():
             conversion_status['completed'] = True
             conversion_status['running'] = False
 
-            # Self-improvement judge runs BEFORE work_dir cleanup (it needs the
-            # original EPUBs). Gated by the toggle and isolated so it can never
-            # affect the conversion result.
+            # Post-conversion steps run BEFORE work_dir cleanup (the judge needs
+            # the original EPUBs). Each is gated by its toggle and isolated so it
+            # can never affect the conversion result. RAG distill runs first:
+            # user deliverable before the QA loop.
             prefs = load_preferences()
+            if prefs.get('rag_distill_enabled') and pairs:
+                try:
+                    _run_rag_distill(pairs, prefs, source='epub',
+                                     accuracy_critical=bool(prefs.get('rag_accuracy_critical_epub')))
+                except Exception as rd_err:
+                    print(f"RAG distill error (conversion unaffected): {rd_err}")
+
             if prefs.get('self_improvement_enabled') and pairs:
                 try:
                     _run_self_improvement(pairs, prefs.get('self_improve_model'))
@@ -352,6 +445,12 @@ def status():
 def self_improve_status():
     """Get self-improvement evaluation status"""
     return jsonify(self_improvement_status)
+
+
+@app.route('/rag_distill_status')
+def get_rag_distill_status():
+    """Get RAG distillation status"""
+    return jsonify(rag_distill_status)
 
 
 @app.route('/browse_folder', methods=['POST'])
@@ -415,6 +514,10 @@ def get_preferences():
         'pdf_output_folder': prefs.get('pdf_output_folder', 'converted_pdfs'),
         'self_improvement_enabled': prefs.get('self_improvement_enabled', False),
         'self_improve_model': prefs.get('self_improve_model', 'claude-opus-4-8'),
+        'rag_distill_enabled': prefs.get('rag_distill_enabled', False),
+        'rag_distill_enabled_pdf': prefs.get('rag_distill_enabled_pdf', False),
+        'rag_distill_quality': prefs.get('rag_distill_quality', 'standard'),
+        'rag_accuracy_critical_epub': prefs.get('rag_accuracy_critical_epub', False),
         'has_saved_prefs': bool(prefs)
     })
 
@@ -435,6 +538,14 @@ def save_prefs():
         prefs['self_improvement_enabled'] = bool(data['self_improvement_enabled'])
     if 'self_improve_model' in data:
         prefs['self_improve_model'] = data['self_improve_model']
+    if 'rag_distill_enabled' in data:
+        prefs['rag_distill_enabled'] = bool(data['rag_distill_enabled'])
+    if 'rag_distill_enabled_pdf' in data:
+        prefs['rag_distill_enabled_pdf'] = bool(data['rag_distill_enabled_pdf'])
+    if 'rag_distill_quality' in data:
+        prefs['rag_distill_quality'] = data['rag_distill_quality']
+    if 'rag_accuracy_critical_epub' in data:
+        prefs['rag_accuracy_critical_epub'] = bool(data['rag_accuracy_critical_epub'])
 
     success = save_preferences(prefs)
     return jsonify({'success': success})
@@ -907,6 +1018,16 @@ def convert_pdf():
             pdf_conversion_status['completed'] = True
             pdf_conversion_status['running'] = False
 
+            # RAG distill companion (optional post-step). Inner-wrapped so a
+            # distill error can never mark the conversion itself as failed.
+            prefs = load_preferences()
+            if success and output_path and prefs.get('rag_distill_enabled_pdf'):
+                try:
+                    _run_rag_distill([(pdf_path, output_path)], prefs, source='pdf',
+                                     accuracy_critical=accuracy_critical)
+                except Exception as rd_err:
+                    print(f"RAG distill error (conversion unaffected): {rd_err}")
+
         except Exception as e:
             pdf_conversion_status['progress'].append(f"Error: {str(e)}")
             pdf_conversion_status['error'] = str(e)
@@ -1086,7 +1207,7 @@ def run_app_window():
     shown = {'done': False}
 
     def _fit_and_show(*_):
-        w_px, h_px = 960, 1340  # fallback sized to fit the tallest tab if JS fails
+        w_px, h_px = 960, 1480  # fallback sized to fit the tallest tab if JS fails
         try:
             dims = window.evaluate_js(measure_js)
             if dims:

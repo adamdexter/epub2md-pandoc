@@ -18,9 +18,10 @@ The repo dir is named `epub2md-pandoc`; the product/package name is `epub2md`. T
 - `gui.py` — Flask web GUI. Imports the converters; serves `templates/index.html`. Entry: `main()`.
 - `self_improve.py` — **self-improvement mode** (experimental, opt-in). LLM-as-judge (Anthropic SDK, lazy-imported) comparing an EPUB to its Markdown, filing de-duplicated GitHub issues; dedup ledger / caps / circuit-breaker in `~/.epub2md_eval_history.json`. Entry: `evaluate_conversion()`, CLI `python self_improve.py <epub> <md> --dry-run`.
 - `epub_text.py` — spine-aware plain-text extraction from EPUBs (reference text for the judge).
+- `rag_distill.py` — **RAG/LLM Knowledge Optimized mode** (optional). Gemini API (google-genai, lazy-imported) map→reduce distillation of a converted .md into a retrieval-optimized companion `<stem>.rag.md` — never modifies the full .md. Feature-flagged via `RAG_SUPPORT_AVAILABLE` (find_spec probe); deterministic table/numeral verification; cost ledger at `~/.epub2md_gemini_usage.json`, key at `~/.epub2md_gemini_key`. Entry: `distill_markdown()`, CLI `rag-distill <md> --dry-run`.
 - `version.py` — **single source of truth** for the version (`__version__`). pyproject reads it dynamically; `gui.py` and the HTML header read it at runtime. Bump here only.
 
-Dependency graph: `gui.py → {epub, pdf, html}`, and `html → {medium_scraper, reddit_browser} (both optional)`.
+Dependency graph: `gui.py → {epub, pdf, html, rag_distill (optional)}`, `epub/pdf converters → rag_distill (optional, --rag only)`, and `html → {medium_scraper, reddit_browser} (both optional)`.
 
 ## Run & develop
 
@@ -51,7 +52,7 @@ Always run via the project `.venv`. Sample EPUBs for manual testing live in `sam
 ## Quick checks
 
 ```bash
-python3 -m py_compile epub_to_md_converter.py pdf_to_md_converter.py html_to_md_converter.py medium_scraper.py gui.py self_improve.py epub_text.py
+python3 -m py_compile epub_to_md_converter.py pdf_to_md_converter.py html_to_md_converter.py medium_scraper.py gui.py self_improve.py epub_text.py rag_distill.py
 ruff check .          # must be clean (lint is a CI gate)
 pytest -q             # regression suite (install: pip install -e ".[dev]")
 ```
@@ -62,8 +63,8 @@ pytest -q             # regression suite (install: pip install -e ".[dev]")
 
 Toggle in the EPUB tab. When on, after each conversion `self_improve.py` judges EPUB↔Markdown fidelity and files GitHub issues labelled `self-improvement`; `.github/workflows/self-improve.yml` (Claude Code Action) implements a fix, runs the suite + ruff, opens a PR, and **auto-merges on green CI**. The regression suite is the only safety gate — backed by a baseline-tamper guard and a CI `scope-guard` (the coder can't edit `.github/`), a dedup ledger / caps / circuit-breaker, and the toggle as a kill switch.
 
-**Auth (two separate credentials):** the **local judge** uses the Anthropic SDK and needs `ANTHROPIC_API_KEY` in the local env — a Claude subscription OAuth token is *not* a drop-in for the raw Messages API. The **Action** authenticates via `claude_code_oauth_token` (a `CLAUDE_CODE_OAUTH_TOKEN` repo secret generated with `claude setup-token`, for Pro/Max) or `anthropic_api_key`. Requires the Claude GitHub App installed. `anthropic` is lazy-imported, so the base app runs without it. **Status: built + CI-green but NOT activated** (no secret set, `main` not branch-protected). Full design: `.claude/plans/ok-now-i-have-dynamic-galaxy.md`; live handoff: `HANDOFF.md`.
+**Auth (two separate credentials):** the **local judge** auto-selects its engine — the Anthropic SDK when `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` is set, else the `claude` CLI (subscription OAuth, drives `claude -p --json-schema`) when it's on PATH, else skip; `EPUB2MD_JUDGE_ENGINE=api|cli` overrides. The SDK is no longer required for subscription-only users. The **Action** authenticates via `claude_code_oauth_token` (a `CLAUDE_CODE_OAUTH_TOKEN` repo secret generated with `claude setup-token`, for Pro/Max) or `anthropic_api_key`. Requires the Claude GitHub App installed. `anthropic` is lazy-imported, so the base app runs without it. **Status: built + CI-green but NOT activated** (no secret set, `main` not branch-protected). Full design: `.claude/plans/ok-now-i-have-dynamic-galaxy.md`; live handoff: `HANDOFF.md`.
 
 ## Gitignored runtime state
 
-`.venv/`, `.medium_cookies/`, `.medium_chrome_profile/`, `.reddit_chrome_profile/` (nodriver's Reddit profile), and generated `md processed books/` output folders. Never commit session cookies or the Chrome profiles. The self-improvement eval history/ledger lives at `~/.epub2md_eval_history.json` (home dir, not the repo).
+`.venv/`, `.medium_cookies/`, `.medium_chrome_profile/`, `.reddit_chrome_profile/` (nodriver's Reddit profile), and generated `md processed books/` output folders. Never commit session cookies or the Chrome profiles. Home-dir state (not the repo): the self-improvement eval history/ledger at `~/.epub2md_eval_history.json`, the Gemini API key at `~/.epub2md_gemini_key`, and the RAG-distill usage ledger at `~/.epub2md_gemini_usage.json` — never committed.

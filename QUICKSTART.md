@@ -49,6 +49,11 @@ Look in the `md processed books` folder. Files will be named like:
 3. Drag and drop your `.md` files
 4. Done! Claude can now search and reference your books
 
+> **Optional:** the GUI's "Create RAG-optimized knowledge file" checkbox (EPUB and PDF
+> tabs, off by default) writes a retrieval-optimized companion `<name>.rag.md` beside
+> the full conversion — great for Claude Projects / RAG. Needs a Gemini API key; see
+> the "RAG/LLM Knowledge Optimized Mode" section in the README.
+
 ## Example Workflow
 
 ```bash
