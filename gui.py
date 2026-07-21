@@ -131,86 +131,149 @@ class OutputCapture:
         sys.__stdout__.flush()
 
 
-# Global state for the self-improvement evaluation (mirrors the conversion status).
-self_improvement_status = {
-    'running': False,
-    'progress': [],
-    'evaluated': 0,
-    'total': 0,
-    'issues_filed': 0,
-    'engine': None,
-    'completed': False,
-}
+def _pending_self_improve_status():
+    """Fresh not-yet-run self-improvement status (a poller waits on this)."""
+    return {'running': False, 'progress': [], 'evaluated': 0, 'total': 0,
+            'issues_filed': 0, 'engine': None, 'completed': False}
 
-# Global state for the RAG distillation post-step (mirrors the conversion status).
-rag_distill_status = {'running': False, 'progress': [], 'processed': 0, 'total': 0,
-                      'chunk': 0, 'chunks_total': 0, 'calls': 0,
-                      'input_tokens': 0, 'output_tokens': 0, 'cost_usd': 0.0,
-                      'estimate_only': False, 'lifetime_usd': None,
-                      'source': None, 'completed': False}
+
+def _pending_rag_status(source):
+    """Fresh not-yet-run RAG distill status (a poller waits on this)."""
+    return {'running': False, 'progress': [], 'processed': 0, 'total': 0,
+            'chunk': 0, 'chunks_total': 0, 'calls': 0,
+            'input_tokens': 0, 'output_tokens': 0, 'cost_usd': 0.0,
+            'estimate_only': False, 'lifetime_usd': None,
+            'source': source, 'completed': False}
+
+
+# Global state for the self-improvement evaluation (mirrors the conversion status).
+self_improvement_status = _pending_self_improve_status()
+
+# Global state for the RAG distillation post-step, one dict per source tab so an
+# EPUB batch distill and a PDF distill can never clobber each other's status
+# (served by /rag_distill_status?source=epub|pdf).
+rag_distill_status = _pending_rag_status('epub')
+rag_distill_status_pdf = _pending_rag_status('pdf')
+
+
+def _finalize_pending_poststeps(source):
+    """Terminally complete any post-step status that never ran for this source.
+
+    Called from the conversion thread's `finally`: if a panel was left pending
+    (zero converted files, toggle off, or the conversion crashed) its poller
+    would otherwise spin forever — or, worse, keep showing a previous run's
+    completed cost/results. Mutates in place; never rebinds the globals.
+    """
+    st = rag_distill_status_pdf if source == 'pdf' else rag_distill_status
+    if not st.get('completed') and not st.get('running'):
+        st['progress'].append('RAG distill skipped: nothing to distill')
+        st['completed'] = True
+    if source == 'epub':
+        si = self_improvement_status
+        if not si.get('completed') and not si.get('running'):
+            si['progress'].append('Self-improvement skipped: nothing to evaluate')
+            si['completed'] = True
 
 
 def _run_self_improvement(pairs, model):
     """Judge each converted EPUB and file issues. Self-contained: never raises."""
     global self_improvement_status
-    self_improvement_status = {
-        'running': True, 'progress': [], 'evaluated': 0,
-        'total': len(pairs), 'issues_filed': 0, 'engine': None, 'completed': False,
-    }
+    st = _pending_self_improve_status()
+    st['running'] = True
+    st['total'] = len(pairs)
+    self_improvement_status = st
 
     def log(msg):
-        self_improvement_status['progress'].append(str(msg))
+        st['progress'].append(str(msg))
         sys.__stdout__.write(str(msg) + "\n")
 
     try:
         import self_improve
     except Exception as e:
         log(f"Self-improvement unavailable (install the 'selfimprove' extra): {e}")
-        self_improvement_status['running'] = False
-        self_improvement_status['completed'] = True
+        st['running'] = False
+        st['completed'] = True
         return
 
     for epub_path, md_path in pairs:
         try:
             result = self_improve.evaluate_conversion(epub_path, md_path, model=model, logger=log)
             if result.get('engine'):
-                self_improvement_status['engine'] = result['engine']
-            self_improvement_status['evaluated'] += 1
-            self_improvement_status['issues_filed'] += int(result.get('filed') or 0)
+                st['engine'] = result['engine']
+            st['evaluated'] += 1
+            st['issues_filed'] += int(result.get('filed') or 0)
             log(f"Evaluated {os.path.basename(epub_path)}: {result.get('status')} "
                 f"({result.get('filed', 0)} issue(s) filed)")
         except Exception as e:
             log(f"Evaluation error for {os.path.basename(epub_path)}: {e}")
 
-    self_improvement_status['running'] = False
-    self_improvement_status['completed'] = True
-    log(f"Self-improvement complete: {self_improvement_status['issues_filed']} issue(s) filed.")
+    st['running'] = False
+    st['completed'] = True
+    log(f"Self-improvement complete: {st['issues_filed']} issue(s) filed.")
+
+
+class _RunStatusProxy(dict):
+    """Per-file `status` dict handed to rag_distill.distill_markdown.
+
+    distill_markdown mirrors the CURRENT file's cumulative usage into the dict
+    it is given, overwriting 'calls'/'cost_usd'/token keys after every API call
+    — which would reset the live GUI cost badge to per-file spend at each new
+    file of a multi-book batch. The proxy stores the per-file values locally
+    (so the callee reads back exactly what it wrote) while mirroring
+    run-cumulative values — the run-so-far baseline captured at file start plus
+    the per-file value — into the run-level status the badge polls.
+    Chunk-progress and all other keys pass straight through.
+    """
+
+    _COUNTER_KEYS = frozenset({'calls', 'input_tokens', 'output_tokens'})
+
+    def __init__(self, run_status, base_usage):
+        super().__init__()
+        self._run = run_status
+        self._base = {k: int(getattr(base_usage, k, 0) or 0) for k in self._COUNTER_KEYS}
+        self._base_cost = base_usage.cost_usd or 0.0
+        self._base_estimate = bool(base_usage.estimate_only or base_usage.cost_usd is None)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if key in self._COUNTER_KEYS:
+            self._run[key] = self._base[key] + int(value or 0)
+        elif key == 'cost_usd':
+            self._run[key] = round(self._base_cost + float(value or 0.0), 6)
+        elif key == 'estimate_only':
+            self._run[key] = bool(self._base_estimate or value)
+        else:
+            self._run[key] = value
 
 
 def _run_rag_distill(pairs, prefs, source, accuracy_critical):
     """Distill each converted Markdown into a .rag.md companion. Self-contained: never raises."""
-    global rag_distill_status
-    rag_distill_status = {
-        'running': True, 'progress': [], 'processed': 0, 'total': len(pairs),
-        'chunk': 0, 'chunks_total': 0, 'calls': 0,
-        'input_tokens': 0, 'output_tokens': 0, 'cost_usd': 0.0,
-        'estimate_only': False, 'lifetime_usd': None,
-        'source': source, 'completed': False,
-    }
+    global rag_distill_status, rag_distill_status_pdf
+    st = _pending_rag_status(source)
+    st['running'] = True
+    st['total'] = len(pairs)
+    # Rebind the source's global; keep writing through the local `st` so a
+    # later run can never receive this run's log lines or counters.
+    if source == 'pdf':
+        rag_distill_status_pdf = st
+    else:
+        rag_distill_status = st
 
     def log(msg):
-        rag_distill_status['progress'].append(str(msg))
+        st['progress'].append(str(msg))
         sys.__stdout__.write(str(msg) + "\n")
 
     try:
         import rag_distill
     except Exception as e:
         log(f"RAG distill unavailable: pip install 'epub2md[rag]' ({e})")
-        rag_distill_status['running'] = False
-        rag_distill_status['completed'] = True
+        st['running'] = False
+        st['completed'] = True
         return
 
-    # Accumulate usage across all files in the run.
+    # Accumulate usage across all files in the run. Each file gets a
+    # _RunStatusProxy so the live badge shows run-cumulative spend mid-file;
+    # the writes below reconcile the authoritative totals at file boundaries.
     total_usage = rag_distill.UsageTotals()
     for _src_path, md_path in pairs:
         try:
@@ -221,10 +284,10 @@ def _run_rag_distill(pairs, prefs, source, accuracy_critical):
                 cost_cap_usd=float(prefs.get('rag_distill_cost_cap_usd', 2.0)),
                 source_kind=source,
                 log=log,
-                status=rag_distill_status,
+                status=_RunStatusProxy(st, total_usage),
             )
             if result.ok:
-                rag_distill_status['processed'] += 1
+                st['processed'] += 1
             usage = result.usage
             total_usage.calls += usage.calls
             total_usage.input_tokens += usage.input_tokens
@@ -235,31 +298,33 @@ def _run_rag_distill(pairs, prefs, source, accuracy_critical):
                 total_usage.cost_usd = None
             elif total_usage.cost_usd is not None:
                 total_usage.cost_usd += usage.cost_usd
-            rag_distill_status['calls'] = total_usage.calls
-            rag_distill_status['input_tokens'] = total_usage.input_tokens
-            rag_distill_status['output_tokens'] = total_usage.output_tokens
-            rag_distill_status['cost_usd'] = total_usage.cost_usd if total_usage.cost_usd is not None else 0.0
-            rag_distill_status['estimate_only'] = total_usage.estimate_only
+            st['calls'] = total_usage.calls
+            st['input_tokens'] = total_usage.input_tokens
+            st['output_tokens'] = total_usage.output_tokens
+            st['cost_usd'] = total_usage.cost_usd if total_usage.cost_usd is not None else 0.0
+            st['estimate_only'] = total_usage.estimate_only
         except Exception as e:
             log(f"RAG distill error for {os.path.basename(md_path)}: {e}")
 
     # Final cost line — the guaranteed surface for "what did this run cost?".
     try:
         lifetime = rag_distill.load_usage_ledger().get('lifetime', {})
-        rag_distill_status['lifetime_usd'] = lifetime.get('cost_usd')
+        st['lifetime_usd'] = lifetime.get('cost_usd')
         summary = rag_distill.format_usage_line(total_usage, lifetime)
     except Exception:
-        summary = f"RAG distill finished: {rag_distill_status['processed']}/{len(pairs)} file(s) distilled."
+        summary = f"RAG distill finished: {st['processed']}/{len(pairs)} file(s) distilled."
     log(summary)
-    # Mirror into the main conversion log so Copy Logs captures the cost line.
+    # Mirror into the main conversion log so /status serves the cost line; the
+    # frontend re-renders that log when the distill completes, so Copy Logs
+    # (which reads the rendered DOM) captures it.
     try:
         target = pdf_conversion_status if source == 'pdf' else conversion_status
         target['progress'].append(summary)
     except Exception:
         pass
 
-    rag_distill_status['running'] = False
-    rag_distill_status['completed'] = True
+    st['running'] = False
+    st['completed'] = True
 
 
 @app.route('/')
@@ -324,7 +389,7 @@ def _gather_epub_paths(items):
 @app.route('/convert', methods=['POST'])
 def convert():
     """Start the conversion process from a list of items (files/folders/uploads)."""
-    global conversion_status
+    global conversion_status, rag_distill_status, self_improvement_status
 
     if conversion_status.get('running'):
         return jsonify({'error': 'Another conversion is already running. Wait for it to finish.'}), 409
@@ -384,6 +449,13 @@ def convert():
         'completed': False
     }
 
+    # Reset the post-step panels for THIS run, synchronously, before the worker
+    # thread can set completed=True: a poller must never observe a previous
+    # run's completed state (stale cost/results) or spin on a dict nobody will
+    # ever finalize. run_conversion's finally guarantees finalization.
+    rag_distill_status = _pending_rag_status('epub')
+    self_improvement_status = _pending_self_improve_status()
+
     if gather_errors:
         for err in gather_errors:
             conversion_status['progress'].append(f'Warning: {err}')
@@ -400,7 +472,10 @@ def convert():
             sys.stdout = old_stdout
 
             conversion_status['completed'] = True
-            conversion_status['running'] = False
+            # 'running' stays True through the post-steps (cleared in the
+            # finally) so the /convert 409 guard serializes whole runs: a
+            # second conversion can't rebind the shared status globals while
+            # a distill or evaluation is still writing to them.
 
             # Post-conversion steps run BEFORE work_dir cleanup (the judge needs
             # the original EPUBs). Each is gated by its toggle and isolated so it
@@ -422,10 +497,13 @@ def convert():
 
         except Exception as e:
             conversion_status['progress'].append(f"Error: {str(e)}")
-            conversion_status['running'] = False
             conversion_status['completed'] = True
 
         finally:
+            # Resolve any panel whose post-step never ran (no pairs, toggle
+            # off, or crash) so its poller terminates cleanly.
+            _finalize_pending_poststeps('epub')
+            conversion_status['running'] = False
             shutil.rmtree(work_dir, ignore_errors=True)
 
     thread = threading.Thread(target=run_conversion)
@@ -449,8 +527,9 @@ def self_improve_status():
 
 @app.route('/rag_distill_status')
 def get_rag_distill_status():
-    """Get RAG distillation status"""
-    return jsonify(rag_distill_status)
+    """Get RAG distillation status ('epub' tab by default; ?source=pdf for the PDF tab)."""
+    source = request.args.get('source', 'epub')
+    return jsonify(rag_distill_status_pdf if source == 'pdf' else rag_distill_status)
 
 
 @app.route('/browse_folder', methods=['POST'])
@@ -958,12 +1037,15 @@ def check_pdf_converter():
 @app.route('/convert_pdf', methods=['POST'])
 def convert_pdf():
     """Start PDF to Markdown conversion"""
-    global pdf_conversion_status
+    global pdf_conversion_status, rag_distill_status_pdf
 
     if not PDF_CONVERTER_AVAILABLE:
         return jsonify({
             'error': f'PDF converter not available. Missing dependencies: {", ".join(PDF_DEPENDENCIES_MISSING)}'
         }), 400
+
+    if pdf_conversion_status.get('running'):
+        return jsonify({'error': 'Another PDF conversion is already running. Wait for it to finish.'}), 409
 
     data = request.json
     output_folder = data.get('output_folder', 'converted_pdfs')
@@ -993,6 +1075,10 @@ def convert_pdf():
         'error': None
     }
 
+    # Reset the PDF distill panel for THIS run, synchronously, before the
+    # worker can set completed=True (same stale-state guarantee as /convert).
+    rag_distill_status_pdf = _pending_rag_status('pdf')
+
     # Run conversion in background thread
     def run_pdf_conversion():
         global pdf_conversion_status
@@ -1016,7 +1102,8 @@ def convert_pdf():
             if not success:
                 pdf_conversion_status['error'] = message
             pdf_conversion_status['completed'] = True
-            pdf_conversion_status['running'] = False
+            # 'running' stays True through the distill post-step (cleared in
+            # the finally) so the /convert_pdf 409 guard serializes whole runs.
 
             # RAG distill companion (optional post-step). Inner-wrapped so a
             # distill error can never mark the conversion itself as failed.
@@ -1031,8 +1118,13 @@ def convert_pdf():
         except Exception as e:
             pdf_conversion_status['progress'].append(f"Error: {str(e)}")
             pdf_conversion_status['error'] = str(e)
-            pdf_conversion_status['running'] = False
             pdf_conversion_status['completed'] = True
+
+        finally:
+            # Resolve the distill panel if its post-step never ran (failed
+            # conversion, toggle off, or crash) so its poller terminates.
+            _finalize_pending_poststeps('pdf')
+            pdf_conversion_status['running'] = False
 
     thread = threading.Thread(target=run_pdf_conversion)
     thread.daemon = True

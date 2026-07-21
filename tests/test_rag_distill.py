@@ -876,3 +876,346 @@ def test_gui_runner_graceful(gui_mod, monkeypatch):
     status = gui_mod.rag_distill_status
     assert status["completed"] is True and status["running"] is False
     assert any("unavailable" in line for line in status["progress"])
+
+
+# --------------------------------------------------------------------------- #
+# 23. Frontmatter stripped exactly once (image-only first PDF page survives)
+# --------------------------------------------------------------------------- #
+
+SCANNED_PDF_MD = '''---
+title: "Scanned Book"
+author: Maria Santos
+year: 2011
+---
+
+---
+
+FIRSTPAGE unique marker paragraph about the origins of the study.
+
+---
+
+Second page paragraph with more prose about markets.
+
+---
+
+Third page paragraph with prose about institutions.
+'''
+
+
+def test_single_frontmatter_strip_keeps_first_pdf_page(distill_env, tmp_path):
+    # A heading-poor PDF whose first page is image-only emits a body that BEGINS
+    # with a '---' page separator; a second frontmatter strip used to misread it
+    # as an opening fence and silently drop the entire first content page.
+    md = write_md(tmp_path, SCANNED_PDF_MD, name="Scanned Book - Maria Santos 2011.md")
+    result, client = run_distill(md, handler=make_handler(digest=CLEAN_DIGEST), source_kind="pdf")
+    assert result.ok
+    map_prompts = [c["contents"] for c in client.calls if "You are extracting knowledge" in c["contents"]]
+    assert any("FIRSTPAGE" in p for p in map_prompts)            # first content page reached the map
+    # The real-run plan agrees with the estimate/dry-run plan (single strip both ways).
+    assert rd.estimate_run(SCANNED_PDF_MD)["chunks"] == result.chunks_total
+    # Direct contract: strip_frontmatter=False treats a leading '---' as a page
+    # separator, never as a frontmatter fence.
+    body = rd._strip_frontmatter(SCANNED_PDF_MD)[0]
+    assert body.startswith("---")
+    planned = rd.plan_chunks(body, strip_frontmatter=False)
+    assert any("FIRSTPAGE" in c.text for c in planned)
+
+
+# --------------------------------------------------------------------------- #
+# 24. Range hyphens are not minus signs; the year exemption is reachable
+# --------------------------------------------------------------------------- #
+
+def test_numeral_ranges_extract_both_endpoints():
+    assert rd.extract_numerals("2008-2009") == {"2008", "2009"}
+    assert rd.extract_numerals("pp. 45-52") == {"45", "52"}
+    assert rd.extract_numerals("a drop of -52 units") == {"-52"}      # unary minus preserved
+    assert rd.extract_numerals("range 10−12 and −42") == {"10", "12", "-42"}
+
+
+RANGES_MD = '''---
+title: "Ranges"
+author: Maria Santos
+year: 2011
+---
+
+# Chapter 1
+
+Revenues grew 45-52 percent across 2008-2009 according to Maria Santos.
+'''
+
+
+def test_range_numbers_not_false_flagged(distill_env, tmp_path):
+    digest = dict(CLEAN_DIGEST)
+    digest["summary"] = "Maria Santos reports growth of 52 percent by 2009."
+    md = write_md(tmp_path, RANGES_MD, name="Ranges - Maria Santos 2011.md")
+    result, _ = run_distill(md, handler=make_handler(digest=digest))
+    assert result.ok
+    assert result.verification.flagged_numbers == []             # '52'/'2009' are source-backed
+    companion = Path(result.companion_path).read_text(encoding="utf-8")
+    assert "⚠ unverified figure" not in companion
+
+    # Accuracy-critical: the correct block survives instead of being dropped.
+    md2 = write_md(tmp_path, RANGES_MD, name="Ranges2 - Maria Santos 2011.md")
+    result2, _ = run_distill(md2, handler=make_handler(digest=digest), accuracy_critical=True)
+    assert result2.ok and result2.verification.dropped_items == 0
+    assert "52 percent by 2009" in Path(result2.companion_path).read_text(encoding="utf-8")
+
+
+YEARS_MD = '''---
+title: "Years"
+author: Maria Santos
+---
+
+# Chapter 1
+
+The Model 3.1997 specification was published without fanfare.
+'''
+
+
+def test_year_exemption_fires(distill_env, tmp_path):
+    assets = rd.extract_verbatim_assets(YEARS_MD)
+    assert "1997" not in assets.numerals_source      # folded into '3.1997' by the numeral pass
+    assert "1997" in assets.years_source
+    assert rd._flag_unit_text("The 1997 spec mattered.", assets) == []          # rescue fires
+    assert rd._flag_unit_text("The 1996 spec mattered.", assets) == ["1996"]    # absent year flags
+
+    digest = dict(CLEAN_DIGEST)
+    digest["summary"] = "Maria Santos explains the 1997 specification in detail."
+    md = write_md(tmp_path, YEARS_MD, name="Years - Maria Santos 2011.md")
+    result, _ = run_distill(md, handler=make_handler(digest=digest))
+    assert result.ok and result.verification.flagged_numbers == []
+
+
+# --------------------------------------------------------------------------- #
+# 25. Firewall never scans deterministic chunk-label headings
+# --------------------------------------------------------------------------- #
+
+def _scanned_pages_md(n_pages=15):
+    page = ("scanned page words about coordination and markets in prose form " * 5).strip()
+    return ('---\ntitle: "Scan Study"\nauthor: Maria Santos\nyear: 2011\n---\n\n'
+            + "\n\n---\n\n".join(page for _ in range(n_pages)) + "\n")
+
+
+def test_firewall_skips_deterministic_headings(distill_env, tmp_path):
+    claims_digest = dict(CLEAN_DIGEST)
+    claims_digest["claims"] = ["Maria Santos argues markets coordinate activity."]
+    src = _scanned_pages_md()
+
+    md = write_md(tmp_path, src, name="Scan Study - Maria Santos 2011.md")
+    result, _ = run_distill(md, handler=make_handler(digest=claims_digest), source_kind="pdf")
+    assert result.ok
+    companion = Path(result.companion_path).read_text(encoding="utf-8")
+    assert '"Pages ~1–15"' in companion                # chunk-label heading rendered
+    assert result.verification.flagged_numbers == []   # '15' is scaffolding, not LLM output
+    assert "⚠ unverified figure" not in companion
+
+    # Accuracy-critical: the clean claims block survives instead of being dropped.
+    md2 = write_md(tmp_path, src, name="Scan Study 2 - Maria Santos 2011.md")
+    result2, _ = run_distill(md2, handler=make_handler(digest=claims_digest),
+                             source_kind="pdf", accuracy_critical=True)
+    assert result2.ok and result2.verification.dropped_items == 0
+    companion2 = Path(result2.companion_path).read_text(encoding="utf-8")
+    assert "Maria Santos argues markets coordinate activity." in companion2
+
+
+# --------------------------------------------------------------------------- #
+# 26. Fail fast: non-retryable errors, incremental abort, server retryDelay
+# --------------------------------------------------------------------------- #
+
+class _APIErr(Exception):
+    def __init__(self, msg="", code=None, retry_delay=None):
+        super().__init__(msg)
+        if code is not None:
+            self.code = code
+        if retry_delay is not None:
+            self.retry_delay = retry_delay
+
+
+def test_error_classification_and_server_delay():
+    assert rd._is_non_retryable(_APIErr("bad request", code=400))
+    assert rd._is_non_retryable(_APIErr("no auth", code=401))
+    assert rd._is_non_retryable(_APIErr("forbidden", code=403))
+    assert rd._is_non_retryable(_APIErr("API key not valid. Please pass a valid API key."))
+    assert rd._is_non_retryable(_APIErr("403 PERMISSION_DENIED: consumer suspended"))
+    assert not rd._is_non_retryable(_APIErr("429 RESOURCE_EXHAUSTED: quota exceeded"))
+    assert not rd._is_non_retryable(_APIErr("503 UNAVAILABLE: overloaded", code=503))
+    assert not rd._is_non_retryable(_APIErr("connection reset by peer"))
+
+    assert rd._server_retry_delay(_APIErr("x", retry_delay=5)) == 5.0
+    assert rd._server_retry_delay(
+        _APIErr("429 RESOURCE_EXHAUSTED details: 'retryDelay': '18s'")) == 18.0
+    assert rd._server_retry_delay(_APIErr('{"retryDelay": "2.5s"}')) == 2.5
+    assert rd._server_retry_delay(_APIErr("plain failure")) is None
+
+
+def test_dead_key_fails_fast(distill_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "plan_chunks", _five_chunks)
+    md = write_md(tmp_path, name="DK - Maria Santos 2011.md")
+
+    def dead_key(model, contents, config, call_no):
+        raise _APIErr("API key not valid. Please pass a valid API key.", code=400)
+
+    logs = []
+    result, client = run_distill(md, handler=dead_key, logs=logs)
+    assert result.ok is False and result.skipped_reason == "api_error"
+    assert len(client.calls) == 1                      # no retries, no further chunks
+    assert result.chunks_failed == 1 and result.chunks_total == 5
+    assert any("retrying cannot fix this" in line for line in logs)
+    assert json.loads(rd.USAGE_LEDGER.read_text())["runs"][-1]["outcome"] == "failed"
+
+
+def test_failure_ratio_aborts_incrementally(distill_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "plan_chunks", _five_chunks)
+    md = write_md(tmp_path, name="INC - Maria Santos 2011.md")
+    result, client = run_distill(md, handler=_failing_handler(["Chapter 1", "Chapter 2"]))
+    assert result.ok is False and result.skipped_reason == "too_many_failures"
+    assert result.chunks_failed == 2
+    # 2 failed chunks x 4 attempts each; chunks 3-5 were never attempted.
+    assert len(client.calls) == 8
+    assert not any("Chapter 3" in c["contents"] for c in client.calls)
+
+
+def test_server_retry_delay_honored_and_capped(distill_env, tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(rd.time, "sleep", lambda s: sleeps.append(float(s)))
+
+    def limited(msg):
+        def handler(model, contents, config, call_no):
+            raise _APIErr(msg)
+        return handler
+
+    md = write_md(tmp_path, name="RD1 - Maria Santos 2011.md")
+    run_distill(md, handler=limited("429 RESOURCE_EXHAUSTED 'retryDelay': '7s'"))
+    assert sleeps == [7.0, 7.0, 7.0]                   # max(planned 0, server 7)
+
+    sleeps.clear()
+    md2 = write_md(tmp_path, name="RD2 - Maria Santos 2011.md")
+    run_distill(md2, handler=limited("429 RESOURCE_EXHAUSTED 'retryDelay': '300s'"))
+    assert sleeps == [60.0, 60.0, 60.0]                # capped at MAX_RETRY_DELAY_S
+
+    sleeps.clear()
+    monkeypatch.setattr(rd, "RETRY_BACKOFF_S", (10, 10, 10))
+    md3 = write_md(tmp_path, name="RD3 - Maria Santos 2011.md")
+    run_distill(md3, handler=limited("429 RESOURCE_EXHAUSTED 'retryDelay': '7s'"))
+    assert sleeps == [10.0, 10.0, 10.0]                # planned backoff wins when larger
+
+
+# --------------------------------------------------------------------------- #
+# 27. Valid JSON of the wrong shape triggers repair, never a silent empty digest
+# --------------------------------------------------------------------------- #
+
+def test_wrong_shape_json_triggers_repair(distill_env, tmp_path):
+    # Top-level array: valid JSON, wrong shape => repair reprompt, not empty output.
+    def array_then_good(model, contents, config, call_no):
+        if "You are extracting knowledge" in contents:
+            if "Re-emit valid JSON only" in contents:
+                return FakeResponse(json.dumps(DIGEST))
+            return FakeResponse(json.dumps([DIGEST]))
+        return FakeResponse(json.dumps(REDUCE))
+
+    md = write_md(tmp_path, name="WS1 - Maria Santos 2011.md")
+    result, client = run_distill(md, handler=array_then_good)
+    assert result.ok and result.chunks_failed == 0
+    repairs = [c for c in client.calls if "Your previous output was invalid JSON" in c["contents"]]
+    assert len(repairs) == 1
+    companion = Path(result.companion_path).read_text(encoding="utf-8")
+    assert DIGEST["summary"] in companion              # content did not silently vanish
+
+    # Wrapper object: {"response": {...}} is also wrong-shape.
+    def wrapper_then_good(model, contents, config, call_no):
+        if "You are extracting knowledge" in contents:
+            if "Re-emit valid JSON only" in contents:
+                return FakeResponse(json.dumps(DIGEST))
+            return FakeResponse(json.dumps({"response": DIGEST}))
+        return FakeResponse(json.dumps(REDUCE))
+
+    md2 = write_md(tmp_path, name="WS2 - Maria Santos 2011.md")
+    result2, _ = run_distill(md2, handler=wrapper_then_good)
+    assert result2.ok and result2.chunks_failed == 0
+    assert DIGEST["summary"] in Path(result2.companion_path).read_text(encoding="utf-8")
+
+    # Legitimately sparse digests (schema keys, empty values) are NOT wrong-shape.
+    sparse = {"summary": "", "keywords": [], "claims": [], "facts_numeric": [],
+              "terms": [], "qa": [], "entities": []}
+    assert rd._digest_shape_ok(sparse) is True
+    assert rd._digest_shape_ok([DIGEST]) is False
+    assert rd._digest_shape_ok({"response": DIGEST}) is False
+
+
+def test_wrong_shape_twice_becomes_placeholder(distill_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "plan_chunks", _five_chunks)
+
+    def persist_wrong(model, contents, config, call_no):
+        if "You are extracting knowledge" in contents and "Chapter 1" in contents:
+            return FakeResponse(json.dumps(["still", "wrong"]))
+        if "You are extracting knowledge" in contents:
+            return FakeResponse(json.dumps(DIGEST))
+        return FakeResponse(json.dumps(REDUCE))
+
+    md = write_md(tmp_path, name="WS3 - Maria Santos 2011.md")
+    result, _ = run_distill(md, handler=persist_wrong)
+    assert result.ok and result.chunks_failed == 1     # counted, not silently empty
+    assert "could not be distilled" in Path(result.companion_path).read_text(encoding="utf-8")
+
+
+def test_prereduce_wrong_shape_falls_back_to_raw_digests(distill_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "PRE_REDUCE_TOKEN_LIMIT", 10)
+
+    def prereduce_wrong(model, contents, config, call_no):
+        if "Merge these section digests" in contents:
+            return FakeResponse(json.dumps([{"bogus": 1}]))       # valid JSON, wrong shape
+        if "You are extracting knowledge" in contents:
+            return FakeResponse(json.dumps(DIGEST))
+        return FakeResponse(json.dumps(REDUCE))
+
+    md = write_md(tmp_path, name="WS4 - Maria Santos 2011.md")
+    result, client = run_distill(md, handler=prereduce_wrong)
+    assert result.ok
+    reduce_calls = [c["contents"] for c in client.calls
+                    if "synthesizing section digests" in c["contents"]]
+    assert len(reduce_calls) == 1
+    assert DIGEST["summary"] in reduce_calls[0]        # raw digests reached the reduce, not empties
+
+
+# --------------------------------------------------------------------------- #
+# 28. Index sections dropped from the plan; estimate output guess calibrated
+# --------------------------------------------------------------------------- #
+
+INDEX_MD = '''---
+title: "Indexed"
+author: Maria Santos
+year: 2011
+---
+
+# Chapter 1
+
+Body prose about markets covering the 2008-2009 crisis in detail.
+
+# Chapter 2
+
+More prose about institutions and coordination across many countries.
+
+# Index
+
+Allocation, 45-52
+
+Bonds, 88
+'''
+
+
+def test_index_section_dropped_numerals_kept():
+    chunks = rd.plan_chunks(INDEX_MD, min_tokens=1)
+    titles = [t for c in chunks for t in c.heading_path]
+    assert "Index" not in titles
+    assert "Allocation" not in "\n".join(c.text for c in chunks)     # index never distilled
+    assets = rd.extract_verbatim_assets(INDEX_MD)
+    assert {"45", "52", "88"} <= assets.numerals_source              # firewall inventory unaffected
+
+
+def test_estimate_output_guess_calibrated():
+    md = "# Book\n\n" + ("many words of body text here " * 4_000).strip()
+    est = rd.estimate_run(md)
+    assert est["est_output_tokens"] == max(int(est["est_input_tokens"] * 0.25), 4_000)
+    assert est["est_output_tokens"] > 4_000            # ratio branch exercised, not the floor
+    small = rd.estimate_run("# T\n\ntiny body.")
+    assert small["est_output_tokens"] == 4_000         # floor intact

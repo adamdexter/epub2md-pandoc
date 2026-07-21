@@ -1025,11 +1025,37 @@
             savePreferences();
         }
 
+        // Re-render the main conversion log from the server after post-steps
+        // append lines to it (e.g. the final LLM usage/cost summary), so the
+        // visible log — and Copy Logs, which reads the rendered DOM — include
+        // them even though pollStatus stopped at conversion completion.
+        async function refreshMainLog(suffix) {
+            try {
+                const endpoint = suffix === '-pdf' ? '/pdf_status' : '/status';
+                const logId = suffix === '-pdf' ? 'pdf-progress-log' : 'progress-log';
+                const data = await (await fetch(endpoint)).json();
+                const logContainer = document.getElementById(logId);
+                logContainer.innerHTML = '';
+                (data.progress || []).forEach(line => {
+                    const p = document.createElement('p');
+                    p.textContent = line;
+                    logContainer.appendChild(p);
+                });
+                logContainer.scrollTop = logContainer.scrollHeight;
+            } catch (error) {
+                console.error('Error refreshing main log:', error);
+            }
+        }
+
         // Poll the RAG distill status (kicked off after conversion) into the
-        // suffix-matched panel: '' = EPUB tab, '-pdf' = PDF tab.
+        // suffix-matched panel: '' = EPUB tab, '-pdf' = PDF tab. Termination is
+        // backend-driven: /convert(_pdf) resets the per-source status at run
+        // start and the conversion thread always finalizes it, so this loop
+        // can neither spin forever nor render a previous run's results.
         async function pollRagDistill(suffix) {
             try {
-                const response = await fetch('/rag_distill_status');
+                const source = suffix === '-pdf' ? 'pdf' : 'epub';
+                const response = await fetch('/rag_distill_status?source=' + source);
                 const data = await response.json();
 
                 const log = document.getElementById('rag-distill-log' + suffix);
@@ -1049,13 +1075,18 @@
                     const lines = data.progress || [];
                     const problem = lines.slice().reverse().find(
                         l => /skipped|unavailable|failed|error|abort/i.test(l));
-                    if (problem && !data.processed) {
+                    if (!data.total && !data.calls) {
+                        // Run finalized with nothing to distill (zero converted
+                        // files or the post-step was skipped): clean idle state.
+                        badge.innerHTML = '— Nothing to distill';
+                    } else if (problem && !data.processed) {
                         badge.innerHTML = '⚠ Skipped/failed — see log';
                     } else if (data.estimate_only) {
                         badge.innerHTML = '✓ Done — tokens only (unpriced model)';
                     } else {
                         badge.innerHTML = '✓ Done — ' + (data.calls || 0) + ' calls, $' + (data.cost_usd || 0).toFixed(4);
                     }
+                    refreshMainLog(suffix);
                 } else {
                     badge.innerHTML = '<span class="spinner"></span> Distilling ' +
                         (data.chunk || 0) + '/' + (data.chunks_total || 0) +
@@ -1077,9 +1108,14 @@
                 const engineEl = document.getElementById('self-improve-engine');
                 if (data.engine) {
                     engineEl.style.display = 'inline';
-                    engineEl.textContent = data.engine === 'cli'
-                        ? 'Judge: Claude Code CLI (subscription)'
-                        : 'Judge: Anthropic API';
+                    if (data.engine === 'none') {
+                        // Sentinel from the no-judge-engine skip path: no judge ran.
+                        engineEl.textContent = 'Judge: skipped (no engine)';
+                    } else {
+                        engineEl.textContent = data.engine === 'cli'
+                            ? 'Judge: Claude Code CLI (subscription)'
+                            : 'Judge: Anthropic API';
+                    }
                 }
 
                 const log = document.getElementById('self-improve-log');
@@ -1096,7 +1132,9 @@
                 const badge = document.getElementById('self-improve-badge');
                 if (data.completed) {
                     badge.className = 'status-badge status-complete';
-                    badge.innerHTML = '✓ ' + (data.issues_filed || 0) + ' issue(s) filed';
+                    badge.innerHTML = data.total
+                        ? '✓ ' + (data.issues_filed || 0) + ' issue(s) filed'
+                        : '— Nothing to evaluate';
                 } else {
                     setTimeout(pollSelfImprove, 1000);
                 }
@@ -1185,7 +1223,11 @@
                     document.getElementById('convert-btn').innerHTML = 'Convert EPUBs to Markdown';
                     document.getElementById('convert-btn').disabled = inputItems.length === 0;
 
-                    // RAG distill runs first after conversion; surface its progress.
+                    // Post-step panels: the toggles decide visibility, but the
+                    // pollers' outcomes derive from the backend status flags
+                    // (reset at /convert, always finalized by the conversion
+                    // thread), so they resolve even when the backend skipped
+                    // the step. RAG distill runs first; surface its progress.
                     if (document.getElementById('rag-distill-enabled').checked) {
                         const rc = document.getElementById('rag-distill-container');
                         rc.classList.add('show');

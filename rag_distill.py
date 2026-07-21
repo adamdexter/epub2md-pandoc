@@ -39,7 +39,8 @@ KEY_FILE = Path.home() / ".epub2md_gemini_key"
 USAGE_LEDGER = Path.home() / ".epub2md_gemini_usage.json"
 DEFAULT_COST_CAP_USD = 2.00
 LEDGER_RUNS_CAP = 100                      # FIFO cap on stored run rows
-RETRY_BACKOFF_S = (2, 8, 30)               # per-retry delays; server retry_delay honored
+RETRY_BACKOFF_S = (2, 8, 30)               # per-retry delays; server retryDelay honored
+MAX_RETRY_DELAY_S = 60.0                   # ceiling on any single retry sleep
 MAX_BLOCK_WORDS = 500                      # atomic-block size ceiling in the companion
 NORMAL_TABLE_ROW_LIMIT = 40                # normal mode appends only tables this small
 PRE_REDUCE_TOKEN_LIMIT = 150_000           # digests above this get a hierarchical pre-reduce
@@ -84,6 +85,7 @@ class VerbatimAssets:
     tables: list[dict]           # {"heading_path": [...], "kind": "pipe"|"html"|"figure", "raw": str}
     numerals_tables: set[str]    # normalized numerals from tables/figures
     numerals_source: set[str]    # normalized numerals from the ENTIRE source md
+    years_source: set[str] = field(default_factory=set)  # 4-digit year runs in the source text
 
 
 @dataclass
@@ -119,6 +121,10 @@ class DistillResult:
 
 class _CostCapExceeded(Exception):
     """Internal: the live per-call cap check tripped mid-run."""
+
+
+class _NonRetryableAPIError(Exception):
+    """Internal: an auth/invalid-request API error that no retry can ever fix."""
 
 
 # --------------------------------------------------------------------------- #
@@ -158,7 +164,10 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-_NUMERAL_RE = re.compile(r"-?\d[\d,]*\.?\d*%?")
+# (?<!\d): a hyphen after a digit is a range separator ("2008-2009", "pp. 45-52"),
+# never a minus sign — both endpoints must enter the inventory unsigned.
+_NUMERAL_RE = re.compile(r"(?<!\d)-?\d[\d,]*\.?\d*%?")
+_YEAR_RE = re.compile(r"(?<!\d)[12]\d{3}(?!\d)")       # standalone 4-digit year runs
 
 
 def _normalize_numeral(raw: str) -> str:
@@ -348,7 +357,8 @@ def extract_verbatim_assets(md_text: str) -> VerbatimAssets:
     for t in tables:
         numerals_tables |= extract_numerals(t["raw"])
     return VerbatimAssets(tables=tables, numerals_tables=numerals_tables,
-                          numerals_source=extract_numerals(md_text))
+                          numerals_source=extract_numerals(md_text),
+                          years_source=set(_YEAR_RE.findall(md_text.replace("−", "-"))))
 
 
 def _excise_verbatim_regions(text: str) -> str:
@@ -366,7 +376,7 @@ def _excise_verbatim_regions(text: str) -> str:
 # Chunk planning
 # --------------------------------------------------------------------------- #
 
-_DROP_SECTION_TITLES = {"table of contents", "pages", "guide", "landmarks", "figures"}
+_DROP_SECTION_TITLES = {"table of contents", "pages", "guide", "landmarks", "figures", "index"}
 
 
 def _clean_title(title: str | None) -> str:
@@ -536,9 +546,15 @@ def _plan_headingless(lines: list[str], masked: list[bool], target_tokens: int) 
 
 def plan_chunks(md_text: str, *, source_type: str = "epub",
                 target_tokens: int = 24_000, max_tokens: int = 32_000,
-                min_tokens: int = 1_500, max_chunks: int = 40) -> list[Chunk]:
-    """Heading-aware chunk plan (deterministic, zero network)."""
-    body, _ = _strip_frontmatter(md_text)
+                min_tokens: int = 1_500, max_chunks: int = 40,
+                strip_frontmatter: bool = True) -> list[Chunk]:
+    """Heading-aware chunk plan (deterministic, zero network).
+
+    Pass strip_frontmatter=False when md_text is an already-stripped body: a
+    second strip would misread a leading PDF page separator (image-only first
+    page) as a frontmatter fence and silently drop the first content page.
+    """
+    body = _strip_frontmatter(md_text)[0] if strip_frontmatter else md_text
     lines = body.split("\n")
     masked = _masked_line_flags(lines)
     heading_flags = [bool(_HEADING_RE.match(ln)) and not m for ln, m in zip(lines, masked)]
@@ -585,9 +601,11 @@ def compute_call_cost(model: str, prompt_tokens: int,
 def _estimate_from_chunks(chunks: list[Chunk], quality: str) -> dict:
     map_model, reduce_model = QUALITY_MODELS.get(quality, QUALITY_MODELS["standard"])
     est_in = sum(c.token_estimate for c in chunks) + PROMPT_OVERHEAD_TOKENS * max(len(chunks), 1)
-    est_out = max(int(est_in * 0.12), 4_000)             # output guess = 12% of input, floor 4k
+    # Output guess = 25% of input, floor 4k — calibrated against a real standard-
+    # quality book run that produced 27% (the original 12% guess ran well under).
+    est_out = max(int(est_in * 0.25), 4_000)
     map_cost, _ = compute_call_cost(map_model, est_in, est_out)
-    reduce_cost, _ = compute_call_cost(reduce_model, est_out, max(int(est_out * 0.12), 4_000))
+    reduce_cost, _ = compute_call_cost(reduce_model, est_out, max(int(est_out * 0.25), 4_000))
     cost = None if (map_cost is None or reduce_cost is None) else round(map_cost + reduce_cost, 4)
     return {"chunks": len(chunks), "est_input_tokens": est_in,
             "est_output_tokens": est_out, "est_cost_usd": cost}
@@ -739,23 +757,62 @@ def _accumulate_usage(usage: UsageTotals, model: str, resp: Any, status: dict | 
         status["estimate_only"] = usage.estimate_only
 
 
+_NON_RETRYABLE_STATUS = {400, 401, 403}
+_NON_RETRYABLE_MSG_RE = re.compile(
+    r"API[ _]?KEY[ _]?INVALID|API key not valid|PERMISSION_DENIED|UNAUTHENTICATED|INVALID_ARGUMENT",
+    re.I)
+
+
+def _is_non_retryable(e: Exception) -> bool:
+    """400/401/403-style API errors (bad key, permission, invalid request):
+    retrying the identical request cannot succeed — fail fast instead."""
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    try:
+        if int(code) in _NON_RETRYABLE_STATUS:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return bool(_NON_RETRYABLE_MSG_RE.search(str(e)))
+
+
+def _server_retry_delay(e: Exception) -> float | None:
+    """Server-advised retry delay: a retry_delay attribute, or the 429 RetryInfo
+    'retryDelay': '18s' detail embedded in the error message."""
+    attr = getattr(e, "retry_delay", None)
+    if attr is not None:
+        try:
+            return float(attr.total_seconds() if hasattr(attr, "total_seconds") else attr)
+        except (TypeError, ValueError):
+            pass
+    m = re.search(r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)\s*s?", str(e), re.I)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
 def _call_model(client: Any, model: str, contents: str, config: Any, usage: UsageTotals,
                 status: dict | None, _log: Callable[[str], None], cost_cap: float) -> Any:
-    """One logical call: retries with backoff, usage accumulation, live cap check."""
+    """One logical call: retries with backoff, usage accumulation, live cap check.
+
+    Non-retryable errors raise _NonRetryableAPIError immediately (no retries);
+    retry sleeps honor max(server retryDelay, planned backoff), capped at 60s."""
     last_error: Exception | None = None
     for attempt in range(1 + len(RETRY_BACKOFF_S)):
         try:
             resp = client.models.generate_content(model=model, contents=contents, config=config)
         except Exception as e:
+            if _is_non_retryable(e):
+                raise _NonRetryableAPIError(f"non-retryable API error from {model}: {e}") from e
             last_error = e
             if attempt < len(RETRY_BACKOFF_S):
                 delay = float(RETRY_BACKOFF_S[attempt])
-                server_delay = getattr(e, "retry_delay", None)     # honor server retry_delay
-                try:
-                    if server_delay:
-                        delay = max(delay, float(server_delay))
-                except (TypeError, ValueError):
-                    pass
+                server_delay = _server_retry_delay(e)              # honor 429 RetryInfo
+                if server_delay is not None:
+                    delay = max(delay, server_delay)
+                delay = min(delay, MAX_RETRY_DELAY_S)
                 _log(f"RAG distill: {model} call failed ({e}); "
                      f"retry {attempt + 1}/{len(RETRY_BACKOFF_S)} in {delay:g}s")
                 if delay:
@@ -863,6 +920,19 @@ def _normalize_digest(data: Any) -> dict:
     return out
 
 
+def _digest_shape_ok(data: Any) -> bool:
+    """A digest must be an object carrying at least one schema key of the right
+    type. Top-level arrays and wrapper objects ({"response": {...}}) fail here so
+    they hit the repair reprompt instead of silently normalizing to empty.
+    Legitimately sparse digests (empty arrays, empty summary) still pass."""
+    if not isinstance(data, dict):
+        return False
+    for k, default in _DIGEST_DEFAULTS.items():
+        if isinstance(data.get(k), type(default)):
+            return True
+    return False
+
+
 def _placeholder_digest(chunk: Chunk) -> dict:
     h = " > ".join(chunk.heading_path)
     d = _normalize_digest(None)
@@ -877,13 +947,19 @@ def _map_chunk(client: Any, model: str, chunk: Chunk, meta: tuple, config: Any,
     prompt = _map_prompt(chunk, meta, accuracy_critical)
     resp = _call_model(client, model, prompt, config, usage, status, _log, cost_cap)
     try:
-        return _normalize_digest(_parse_json_text(resp.text))
+        data = _parse_json_text(resp.text)
+        if not _digest_shape_ok(data):
+            raise ValueError("valid JSON but not a digest object with the required keys")
+        return _normalize_digest(data)
     except ValueError as e:
-        _log(f"RAG distill: chunk {chunk.index + 1} returned invalid JSON; "
+        _log(f"RAG distill: chunk {chunk.index + 1} returned invalid or wrong-shape JSON; "
              "sending one repair reprompt")
         repair = f"{prompt}\n\nYour previous output was invalid JSON: {e}. Re-emit valid JSON only."
         resp2 = _call_model(client, model, repair, config, usage, status, _log, cost_cap)
-        return _normalize_digest(_parse_json_text(resp2.text))
+        data2 = _parse_json_text(resp2.text)
+        if not _digest_shape_ok(data2):
+            raise ValueError("repair reprompt also returned a wrong-shape digest") from e
+        return _normalize_digest(data2)
 
 
 _REDUCE_DEFAULTS: dict = {"executive_summary": "", "thesis": [], "themes": [],
@@ -918,8 +994,11 @@ def _run_reduce(client: Any, quality: str, digests: list[dict], meta: tuple,
             gp = _prereduce_prompt(json.dumps(group, separators=(",", ":"), ensure_ascii=False), meta)
             try:
                 resp = _call_model(client, map_model, gp, pre_config, usage, status, _log, cost_cap)
-                merged.append(_normalize_digest(_parse_json_text(resp.text)))
-            except _CostCapExceeded:
+                data = _parse_json_text(resp.text)
+                if not _digest_shape_ok(data):
+                    raise ValueError("pre-reduce returned a wrong-shape digest")
+                merged.append(_normalize_digest(data))
+            except (_CostCapExceeded, _NonRetryableAPIError):
                 raise
             except Exception:
                 merged.extend(group)       # pre-reduce is an optimization; fall back to raw digests
@@ -1010,8 +1089,11 @@ def _enforce_block(body: str, footer: str) -> str:
 
 
 def _unit(body: str, loc: str, heading: str | None = None,
-          placeholder: bool = False) -> dict:
-    return {"heading": heading, "body": body, "loc": loc, "placeholder": placeholder}
+          placeholder: bool = False, heading_llm: bool = True) -> dict:
+    # heading_llm=False marks a code-generated heading (template + deterministic
+    # chunk label such as 'Pages ~120–135'); the numeral firewall must not scan it.
+    return {"heading": heading, "body": body, "loc": loc, "placeholder": placeholder,
+            "heading_llm": heading_llm}
 
 
 def _question_shape(q: str) -> str:
@@ -1123,7 +1205,8 @@ def _assemble_sections(meta: tuple, chunks: list[Chunk], digests: list[dict],
         claims = [str(c).strip() for c in digest.get("claims", []) if str(c).strip()]
         if claims:
             units.append(_unit("\n".join(f"- {c}" for c in claims), loc,
-                               heading=f'What are the key claims of "{ch}"?'))
+                               heading=f'What are the key claims of "{ch}"?',
+                               heading_llm=False))   # deterministic heading: firewall skips it
         for qa in digest.get("qa", [])[:5]:
             if isinstance(qa, dict) and qa.get("q") and qa.get("a"):
                 units.append(_unit(_pronoun_lint(str(qa["a"]).strip(), subject), loc,
@@ -1241,13 +1324,23 @@ def _is_exempt(n: str, assets: VerbatimAssets) -> bool:
         return False
     if v == int(v) and 0 <= int(v) <= 12:                  # small integers exempt
         return True
-    # 4-digit years are exempt when present anywhere in the source.
-    return bool(re.fullmatch(r"[12]\d{3}", n)) and n in assets.numerals_source
+    # 4-digit years are exempt when present anywhere in the source text — checked
+    # against the dedicated year scan (years_source), so a year the numeral pass
+    # folded into a larger figure (e.g. "Model 3.2009") is still rescued.
+    return bool(re.fullmatch(r"[12]\d{3}", n)) and n in assets.years_source
 
 
 def _flag_unit_text(text: str, assets: VerbatimAssets) -> list[str]:
     return sorted(n for n in _scan_numerals_for_firewall(text)
                   if n not in assets.numerals_source and not _is_exempt(n, assets))
+
+
+def _unit_scan_text(unit: dict) -> str:
+    """LLM-authored text of a unit: the body, plus the heading only when the
+    heading is LLM text — deterministic chunk-label headings (e.g. 'What are the
+    key claims of "Pages ~120–135"?') must never feed the firewall."""
+    head = (unit.get("heading") or "") if unit.get("heading_llm", True) else ""
+    return head + "\n" + unit["body"]
 
 
 def _drop_unit(unit: dict, report: VerificationReport) -> None:
@@ -1266,7 +1359,7 @@ def _apply_numeral_firewall(sections: list[dict], assets: VerbatimAssets, *,
         for unit in sec["units"]:
             if unit.get("placeholder"):    # deterministic self-generated text, not LLM output
                 continue
-            flagged = _flag_unit_text((unit.get("heading") or "") + "\n" + unit["body"], assets)
+            flagged = _flag_unit_text(_unit_scan_text(unit), assets)
             if not flagged:
                 continue
             report.flagged_numbers.extend(flagged)
@@ -1284,7 +1377,7 @@ def _apply_numeral_firewall(sections: list[dict], assets: VerbatimAssets, *,
             for unit in sec["units"]:
                 if unit.get("dropped") or unit.get("placeholder"):
                     continue
-                if _flag_unit_text((unit.get("heading") or "") + "\n" + unit["body"], assets):
+                if _flag_unit_text(_unit_scan_text(unit), assets):
                     return False
     return True
 
@@ -1383,7 +1476,9 @@ def _distill(md_path: str, quality: str, accuracy_critical: bool, cost_cap_usd: 
     body, _ = _strip_frontmatter(md_text)
     assets = extract_verbatim_assets(md_text)
     chunk_input = _excise_verbatim_regions(body) if accuracy_critical else body
-    chunks = plan_chunks(chunk_input, source_type=source_kind)
+    # body is already frontmatter-stripped: strip exactly once (a second strip
+    # would eat the first content page of a PDF whose first page is image-only).
+    chunks = plan_chunks(chunk_input, source_type=source_kind, strip_frontmatter=False)
     est = _estimate_from_chunks(chunks, quality)
     est_str = "cost unknown" if est["est_cost_usd"] is None else f"${est['est_cost_usd']:.2f}"
     _log(f"RAG distill: ~{est['chunks']} chunks, est. {est_str} (cap ${cost_cap_usd:.2f})")
@@ -1444,6 +1539,15 @@ def _distill(md_path: str, quality: str, accuracy_critical: bool, cost_cap_usd: 
                                     status, _log, accuracy_critical, cost_cap_usd)
             except _CostCapExceeded:
                 raise
+            except _NonRetryableAPIError as e:
+                # A dead key/permission error fails every chunk identically —
+                # abort the whole run now instead of grinding through the rest.
+                chunks_failed += 1
+                _log(f"RAG distill aborted: {e} — retrying cannot fix this; no companion written")
+                record("failed", chunks_failed)
+                return DistillResult(False, None, usage, skipped_reason="api_error",
+                                     chunks_total=len(chunks), chunks_failed=chunks_failed,
+                                     error=_scrub(str(e), holder["key"]))
             except Exception as e:
                 chunks_failed += 1
                 _log(f"RAG distill: chunk {i + 1}/{len(chunks)} failed — noted in companion ({e})")
@@ -1452,15 +1556,16 @@ def _distill(md_path: str, quality: str, accuracy_critical: bool, cost_cap_usd: 
                     record("failed", chunks_failed)
                     return DistillResult(False, None, usage, skipped_reason="too_many_failures",
                                          chunks_total=len(chunks), chunks_failed=chunks_failed)
+                # chunks_failed is monotonic: once the ratio is crossed the abort
+                # is inevitable — take it now, not after every remaining chunk.
+                if chunks_failed > FAILURE_ABORT_RATIO * len(chunks):
+                    _log(f"RAG distill aborted: {chunks_failed}/{len(chunks)} chunks failed (>30%) — "
+                         "no companion written")
+                    record("failed", chunks_failed)
+                    return DistillResult(False, None, usage, skipped_reason="too_many_failures",
+                                         chunks_total=len(chunks), chunks_failed=chunks_failed)
                 digest = _placeholder_digest(chunk)
             digests.append(digest)
-
-        if chunks_failed / len(chunks) > FAILURE_ABORT_RATIO:
-            _log(f"RAG distill aborted: {chunks_failed}/{len(chunks)} chunks failed (>30%) — "
-                 "no companion written")
-            record("failed", chunks_failed)
-            return DistillResult(False, None, usage, skipped_reason="too_many_failures",
-                                 chunks_total=len(chunks), chunks_failed=chunks_failed)
 
         try:
             reduce_out = _run_reduce(client, quality, [d for d in digests if not d.get("_failed")],

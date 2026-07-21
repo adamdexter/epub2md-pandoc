@@ -305,6 +305,7 @@ def _judge_via_claude_cli(model: str, reference_text: str, metrics_block: str, m
     ]
     result = subprocess.run(
         cmd, input=prompt, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",  # book text is UTF-8; never trust the locale codec
         timeout=CLI_TIMEOUT_S, cwd=tempfile.gettempdir(),  # neutral cwd: never ingest repo context
     )
     if result.returncode != 0:
@@ -352,13 +353,17 @@ def run_judge(epub_path: str, md_path: str, signals: dict, model: str,
 
     sampled = _sample_chapters(chapters, MAX_CHUNKS_PER_BOOK)
     logger(f"self-improvement: long book; judging {len(sampled)}/{len(chapters)} chapters.")
+    last_err: Exception | None = None
     for index, chapter in sampled:
         reference = f"## {chapter.title or chapter.idref}\n{chapter.text}"
         md_chunk = _md_slice(md_text, index, len(chapters))
         try:
             reports.append(_judge_chunk(engine, client, model, reference, metrics_block, md_chunk))
         except Exception as e:  # one bad chunk shouldn't kill the whole run
+            last_err = e
             logger(f"self-improvement: chunk {index} failed: {e}")
+    if not reports:  # every chunk failed -> the judge never ran; fail closed, not "ok with 0 findings"
+        raise RuntimeError(f"all {len(sampled)} judge chunks failed; last error: {last_err}")
     return reports
 
 

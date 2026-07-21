@@ -234,6 +234,22 @@ def test_cli_engine_happy_path(monkeypatch):
     assert "REF-SENTINEL" in kwargs["input"] and "MD-SENTINEL" in kwargs["input"]
 
 
+def test_cli_engine_forces_utf8_subprocess_encoding(monkeypatch):
+    # text=True alone means locale encoding (cp1252/ASCII on some hosts): non-Latin-1 book text
+    # would raise UnicodeEncodeError before the CLI even runs. UTF-8 must be explicit.
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout=_envelope(_CLEAN_REPORT), stderr="")
+
+    monkeypatch.setattr(si.subprocess, "run", fake_run)
+    si._judge_via_claude_cli(si.DEFAULT_MODEL, "ref − α 中文", "{}", "md")
+    assert captured["text"] is True
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+
+
 def test_cli_engine_result_string_fallback(monkeypatch):
     # Older CLI / schema tool not engaged: no structured_output, result is a JSON string.
     def fake_run(cmd, **kwargs):
@@ -305,6 +321,32 @@ def test_cli_engine_chunked_resilience(monkeypatch, synthetic_epub):
     reports = si.run_judge(epub, md, _signals(), si.DEFAULT_MODEL, engine="cli", logger=lambda *a: None)
     assert calls["n"] >= 2
     assert len(reports) == calls["n"] - 1  # one bad chunk dropped, survivors kept
+
+
+def test_cli_engine_chunked_all_fail_is_error(monkeypatch, tmp_path, synthetic_epub):
+    monkeypatch.setattr(si, "SINGLE_PASS_CHARS", 0)  # force the chunked path
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["n"] += 1
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom: OAuth token expired")
+
+    monkeypatch.setattr(si.subprocess, "run", fake_run)
+    epub, md = synthetic_epub
+
+    # Every chunk failing means the judge never ran: run_judge must raise, not return [].
+    with pytest.raises(RuntimeError, match=r"all \d+ judge chunks failed"):
+        si.run_judge(epub, md, _signals(), si.DEFAULT_MODEL, engine="cli", logger=lambda *a: None)
+    assert calls["n"] >= 2  # it really exercised the chunked path
+
+    # ...and the orchestrator fails closed: error status, zero filings, judge_error in the history.
+    _force_cli_engine(monkeypatch)
+    hist = _redirect_history(monkeypatch, tmp_path)
+    result = si.evaluate_conversion(epub, md, dry_run=True, logger=lambda *a: None)
+    assert result["status"] == "error" and result["engine"] == "cli"
+    assert "filed" not in result and "outcomes" not in result
+    evals = _json.loads(hist.read_text(encoding="utf-8"))["evals"]
+    assert evals and evals[-1]["status"] == "judge_error"
 
 
 def test_cli_engine_needs_no_sdk(monkeypatch, tmp_path, synthetic_epub):
