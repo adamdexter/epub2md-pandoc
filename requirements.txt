@@ -31,6 +31,9 @@ pymupdf>=1.23.0          # Fast text extraction, good control
 pdfplumber>=0.10.0       # Excellent table extraction
 Pillow>=10.0.0           # Image processing for OCR
 
+# RAG/LLM Knowledge Optimized mode (optional at runtime; core runs without it)
+google-genai>=1.21
+
 # Optional PDF tools (for enhanced quality)
 # marker-pdf>=0.2.0      # Best overall quality, layout-aware (large install, GPU recommended)
 # pytesseract>=0.3.10    # OCR for scanned documents (requires tesseract system package)

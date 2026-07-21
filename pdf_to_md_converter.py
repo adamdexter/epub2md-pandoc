@@ -1394,6 +1394,7 @@ Examples:
   python pdf_to_md_converter.py document.pdf
   python pdf_to_md_converter.py document.pdf -o ./output
   python pdf_to_md_converter.py financial_report.pdf --accuracy-critical
+  python pdf_to_md_converter.py document.pdf --rag --rag-quality max
         """
     )
 
@@ -1402,6 +1403,10 @@ Examples:
                         help='Output directory (default: ./converted_pdfs)')
     parser.add_argument('--accuracy-critical', action='store_true',
                         help='Use higher quality threshold for financial/scientific documents')
+    parser.add_argument('--rag', action='store_true',
+                        help='Generate RAG-optimized .rag.md companion (Gemini API)')
+    parser.add_argument('--rag-quality', choices=['standard', 'max'], default='standard',
+                        help='Distillation quality tier (default: standard)')
     parser.add_argument('--check-deps', action='store_true',
                         help='Check available dependencies and exit')
 
@@ -1426,6 +1431,14 @@ Examples:
 
     if success:
         print(f"\n{message}")
+        if args.rag and filepath:
+            try:
+                import rag_distill  # lazy — only imported when --rag is set
+                rag_distill.distill_markdown(filepath, quality=args.rag_quality,
+                                             accuracy_critical=args.accuracy_critical,
+                                             source_kind='pdf')
+            except Exception as e:
+                print(f"RAG distill error (conversion unaffected): {e}")
         sys.exit(0)
     else:
         print(f"\nError: {message}", file=sys.stderr)

@@ -754,29 +754,131 @@ This script is optimized for uploading books to Claude Projects:
 
 After conversion, simply drag the `.md` files into your Claude Project's knowledge base!
 
+## RAG/LLM Knowledge Optimized Mode
+
+An optional mode (checkbox on the EPUB and PDF tabs, **off by default**) that generates a
+**knowledge companion** beside each full conversion: `<name>.rag.md`. While the full `.md`
+is a faithful copy of the book, the companion is a retrieval-optimized distillate built for
+Claude Projects and RAG systems — self-contained summaries, key facts, a concept glossary,
+a question bank, and tables reproduced verbatim from the source. Every block stands alone
+(no dangling pronouns, no "the author") and carries a source footer, so a chunk retrieved
+out of context still makes sense. The full conversion `.md` is **never modified or replaced**.
+
+Distillation runs on the **Gemini API** via the optional `google-genai` package:
+
+```bash
+pip install 'epub2md[rag]'   # already installed if you used install.sh / requirements.txt
+```
+
+### API Key Setup
+
+Provide a Gemini API key either way — both work when launching the macOS `.app` from the
+Finder (which doesn't inherit your shell environment; the key file is the reliable option
+there):
+
+```bash
+export GEMINI_API_KEY=...                # environment variable, or:
+echo "YOUR_KEY" > ~/.epub2md_gemini_key
+chmod 600 ~/.epub2md_gemini_key          # keep it private; the app warns if it isn't
+```
+
+No key (or no `google-genai`) simply skips the companion — the standard conversion is
+untouched.
+
+### Quality Tiers and Cost
+
+| Tier | Models | Typical cost / book |
+|---|---|---|
+| **Standard** (recommended) | `gemini-3.5-flash-lite` maps + `gemini-3.6-flash` reduce | ~$0.20–0.50 |
+| **Max** | `gemini-3.6-flash` maps + `gemini-3.1-pro-preview` synthesis | ~$0.90 |
+
+A **$2.00 per-file cost cap** is enforced before and during every run (raise it with
+`rag_distill_cost_cap_usd` in `~/.epub2md_preferences.json`). For a free, zero-network
+cost preview:
+
+```bash
+rag-distill "Book - Author (2016).md" --dry-run   # chunk plan + table inventory + cost estimate
+```
+
+### Accuracy Critical
+
+For documents where the numbers must be right, tick **Accuracy Critical** (on the PDF tab
+the existing accuracy checkbox applies to the companion too). Guarantees:
+
+- **Tables and figures are copied byte-for-byte** into a "Verbatim Tables and Figures"
+  appendix — the LLM never rewrites tabular numbers.
+- **Every table numeral is machine-verified** to survive into the companion.
+- **Every number in LLM-generated prose is checked against the source text**; unverified
+  numbers are dropped, and if any would still survive, the run **aborts and writes no
+  file** — no companion is always preferred over a wrong one.
+
+### Command Line
+
+```bash
+epub2md /path/to/epubs --rag [--rag-quality standard|max] [--rag-accuracy-critical]
+pdf2md book.pdf --rag [--rag-quality standard|max]    # reuses the existing --accuracy-critical
+rag-distill book.md [--quality standard|max] [--accuracy-critical] [--cost-cap 2.00] \
+                    [-o OUT.rag.md] [--dry-run] [--usage]
+```
+
+A distillation failure never affects the standard conversion (or the exit code of the
+converters).
+
+### Usage Ledger
+
+Every run — including failed/aborted ones, since tokens were billed — is recorded in
+`~/.epub2md_gemini_usage.json` with per-run and lifetime token/cost totals. Each run ends
+with a summary line in the GUI log and CLI output:
+
+```
+LLM usage: 18 calls, 412,300 in / 28,100 out tok, $0.0132 this run — lifetime $0.87
+```
+
+Unrecognized (unpinned) models report **tokens only** — a dollar figure is never
+fabricated. `rag-distill --usage` prints the ledger totals.
+
 ## Self-Improvement Mode (Experimental)
 
 A toggle-able mode that lets the converter **detect and fix its own conversion-quality
 regressions**. When enabled (checkbox on the EPUB tab), after each conversion:
 
-1. An **LLM-as-judge** (`self_improve.py`, Claude via the Anthropic SDK) compares the
-   original EPUB to the produced Markdown and returns structured findings.
+1. An **LLM-as-judge** (`self_improve.py`, Claude via the Anthropic SDK or the local
+   `claude` CLI) compares the original EPUB to the produced Markdown and returns
+   structured findings.
 2. Real problems are filed as de-duplicated **GitHub issues** labelled `self-improvement`.
 3. A **Claude Code GitHub Action** (`.github/workflows/self-improve.yml`) implements the
    fix on a branch, runs the regression suite + ruff, opens a PR, and **auto-merges on
    green CI**.
 
-It's **off by default** because it consumes API tokens. The regression suite (`tests/`,
+It's **off by default** because it consumes API tokens / subscription usage. The
+regression suite (`tests/`,
 run with `pytest -q`) is the safety gate between an AI fix and `main`, reinforced by a
 baseline-tamper guard, a CI scope-guard, a dedup ledger, per-run/per-day caps, and a
 circuit breaker.
 
-### Setup
+### Setup — Judge Engine Auto-Selection
 
-```bash
-pip install -e ".[selfimprove]"   # adds the anthropic SDK (judge)
-export ANTHROPIC_API_KEY=sk-ant-...
-```
+The local judge picks its engine automatically:
+
+1. **API engine** — if `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) is set, it calls
+   the Anthropic API via the SDK:
+
+   ```bash
+   pip install -e ".[selfimprove]"   # adds the anthropic SDK
+   export ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+2. **CLI engine** — otherwise, if the `claude` CLI (Claude Code) is on `PATH` and logged
+   in (Claude Pro/Max subscription), the judge drives `claude -p` headless using your
+   subscription. No API key and no `anthropic` SDK required.
+3. **Neither** — the judge is skipped with a clear log line.
+
+Force a specific engine with `EPUB2MD_JUDGE_ENGINE=api` or `EPUB2MD_JUDGE_ENGINE=cli`.
+The engine in use is shown in the GUI status panel and logged per evaluation.
+
+> **Note:** CLI mode draws from your subscription's 5-hour usage window and (unlike the
+> API engine) gets no prompt caching, so chunked runs on large books consume more of the
+> window. Usage stays bounded by the judge's built-in chunk caps.
 
 To enable the autonomous fixer (the GitHub side):
 

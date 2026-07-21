@@ -2,9 +2,28 @@
 
 All notable changes to epub2md-pandoc are tracked here.
 
-## [Unreleased]
+## [3.3.0] - 2026-07-21
 
 ### Added
+- **RAG/LLM Knowledge Optimized mode** (EPUB + PDF tabs, default off) — generates a
+  companion `<name>.rag.md` beside the full conversion via the Gemini API: a
+  self-contained, retrieval-optimized knowledge distillate (summaries, glossary,
+  question bank, verbatim tables). The full `.md` is never modified.
+  - Quality select: **Standard** (~$0.30/book — `gemini-3.5-flash-lite` maps +
+    `gemini-3.6-flash` reduce) or **Max** (adds `gemini-3.1-pro-preview` synthesis).
+  - **Accuracy Critical** distillation: tables/figures copied verbatim and every
+    table numeral machine-verified; unverified numbers are dropped or abort the
+    companion.
+  - Cost controls: $2.00/file preflight cap, live cost in the GUI, per-run and
+    lifetime usage ledger at `~/.epub2md_gemini_usage.json`; unpriced models report
+    tokens only — never a fabricated dollar figure.
+  - CLI: `--rag` / `--rag-quality` on both converters (`--rag-accuracy-critical` on
+    epub2md; pdf2md reuses `--accuracy-critical`); new `rag-distill` command with
+    `--dry-run` cost preview; optional install: `pip install 'epub2md[rag]'`.
+- **Self-improvement judge: claude-CLI engine** — subscription-only machines now run
+  the LLM judge via `claude -p --json-schema` (auto-selected when no
+  `ANTHROPIC_API_KEY`; `EPUB2MD_JUDGE_ENGINE` overrides); engine shown in the GUI
+  status panel.
 - **Reddit real-browser fallback (`reddit_browser.py`, optional)** — Reddit's
   post-2023 lockdown blocks the plain JSON endpoint for non-browser requests, so
   Reddit conversions often failed with HTTP 403. When the direct fetch is blocked
@@ -15,6 +34,23 @@ All notable changes to epub2md-pandoc are tracked here.
   as the Medium path. Install with `pip install nodriver` or `pip install -e
   ".[reddit]"`. The base app runs without it (feature-flagged), and the error
   message points users to it when missing.
+- **Reddit posts** — Reddit pages are served behind a JavaScript bot-check
+  ("Please wait for verification"), so the generic HTML extractors only ever
+  saw the interstitial and produced no content. Reddit URLs are now detected
+  and routed through Reddit's public JSON API instead, rendering the post body
+  and (nested) comments to Markdown with author/subreddit/date metadata.
+  Handles self/link/gallery posts and `/s/` share links; surfaces a clear
+  message when Reddit rate-limits the request.
+- **Paginated web articles** — the web-article converter can now follow
+  pagination query parameters (`?page=`, `?pg=`, `?paged=`, etc.) and combine
+  multiple pages into a single Markdown file:
+  - When a URL with a pagination parameter is detected, the GUI reveals a
+    "Pages to capture" field and the CLI prompts for a page count.
+  - Capture starts from the page number in the URL and increments. For example,
+    a URL ending in `?page=2` with a count of `3` captures pages 2, 3, and 4.
+  - New `--pages N` flag on `html_to_md_converter.py` for non-interactive use;
+    `convert_url_to_markdown()` gains a `page_count` parameter. Images on later
+    pages are also captured and de-duplicated.
 
 ### Fixed
 - **SSL certificate failures no longer masquerade as connectivity errors, and now
@@ -43,24 +79,10 @@ All notable changes to epub2md-pandoc are tracked here.
   itself when possible, and otherwise fails with a clear "install the decoder" message.
   `brotli` is now a declared dependency for native decoding.
 
-### Added
-- **Reddit posts** — Reddit pages are served behind a JavaScript bot-check
-  ("Please wait for verification"), so the generic HTML extractors only ever
-  saw the interstitial and produced no content. Reddit URLs are now detected
-  and routed through Reddit's public JSON API instead, rendering the post body
-  and (nested) comments to Markdown with author/subreddit/date metadata.
-  Handles self/link/gallery posts and `/s/` share links; surfaces a clear
-  message when Reddit rate-limits the request.
-- **Paginated web articles** — the web-article converter can now follow
-  pagination query parameters (`?page=`, `?pg=`, `?paged=`, etc.) and combine
-  multiple pages into a single Markdown file:
-  - When a URL with a pagination parameter is detected, the GUI reveals a
-    "Pages to capture" field and the CLI prompts for a page count.
-  - Capture starts from the page number in the URL and increments. For example,
-    a URL ending in `?page=2` with a count of `3` captures pages 2, 3, and 4.
-  - New `--pages N` flag on `html_to_md_converter.py` for non-interactive use;
-    `convert_url_to_markdown()` gains a `page_count` parameter. Images on later
-    pages are also captured and de-duplicated.
+### Notes
+- The RAG mode is fully optional: without `google-genai` or a Gemini API key,
+  conversion is unchanged; any distillation failure never affects the standard
+  conversion.
 
 ## [3.2.0] - 2026-06-19
 
