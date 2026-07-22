@@ -143,7 +143,8 @@ def _pending_rag_status(source):
             'chunk': 0, 'chunks_total': 0, 'calls': 0,
             'input_tokens': 0, 'output_tokens': 0, 'cost_usd': 0.0,
             'estimate_only': False, 'lifetime_usd': None,
-            'source': source, 'completed': False}
+            'source': source, 'completed': False,
+            'cancel': False, 'cancelled': False}
 
 
 # Global state for the self-improvement evaluation (mirrors the conversion status).
@@ -245,6 +246,13 @@ class _RunStatusProxy(dict):
         else:
             self._run[key] = value
 
+    def get(self, key, default=None):
+        # The Stop button sets 'cancel' on the RUN status; distill_markdown
+        # reads it through this per-file proxy — delegate so the flag is seen.
+        if key == 'cancel':
+            return self._run.get('cancel', default)
+        return super().get(key, default)
+
 
 def _run_rag_distill(pairs, prefs, source, accuracy_critical):
     """Distill each converted Markdown into a .rag.md companion. Self-contained: never raises."""
@@ -276,6 +284,11 @@ def _run_rag_distill(pairs, prefs, source, accuracy_critical):
     # the writes below reconcile the authoritative totals at file boundaries.
     total_usage = rag_distill.UsageTotals()
     for _src_path, md_path in pairs:
+        if st.get('cancel'):
+            remaining = len(pairs) - st['processed']
+            log(f"RAG distill stopped by user — skipping {remaining} remaining file(s)")
+            st['cancelled'] = True
+            break
         try:
             result = rag_distill.distill_markdown(
                 md_path,
@@ -303,6 +316,9 @@ def _run_rag_distill(pairs, prefs, source, accuracy_critical):
             st['output_tokens'] = total_usage.output_tokens
             st['cost_usd'] = total_usage.cost_usd if total_usage.cost_usd is not None else 0.0
             st['estimate_only'] = total_usage.estimate_only
+            if result.skipped_reason == 'cancelled':
+                st['cancelled'] = True
+                break                       # don't start the remaining files
         except Exception as e:
             log(f"RAG distill error for {os.path.basename(md_path)}: {e}")
 
@@ -530,6 +546,24 @@ def get_rag_distill_status():
     """Get RAG distillation status ('epub' tab by default; ?source=pdf for the PDF tab)."""
     source = request.args.get('source', 'epub')
     return jsonify(rag_distill_status_pdf if source == 'pdf' else rag_distill_status)
+
+
+@app.route('/rag_distill_stop', methods=['POST'])
+def rag_distill_stop():
+    """Request a running RAG distillation to stop (?source=epub|pdf).
+
+    Sets the cancel flag on the CURRENT run's status dict; rag_distill checks it
+    before every API call, between chunks/files, and once per second inside
+    retry backoff sleeps, then aborts cleanly (spend recorded, no partial
+    companion). Idempotent; a no-op if nothing is running.
+    """
+    source = request.args.get('source', 'epub')
+    st = rag_distill_status_pdf if source == 'pdf' else rag_distill_status
+    was_running = bool(st.get('running'))
+    st['cancel'] = True
+    if was_running:
+        st['progress'].append('Stop requested — finishing the in-flight call, no companion will be written…')
+    return jsonify({'ok': True, 'was_running': was_running, 'source': source})
 
 
 @app.route('/browse_folder', methods=['POST'])

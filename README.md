@@ -793,8 +793,11 @@ untouched.
 | **Max** | `gemini-3.6-flash` maps + `gemini-3.1-pro-preview` synthesis | ~$0.90 |
 
 A **$2.00 per-file cost cap** is enforced before and during every run (raise it with
-`rag_distill_cost_cap_usd` in `~/.epub2md_preferences.json`). For a free, zero-network
-cost preview:
+`rag_distill_cost_cap_usd` in `~/.epub2md_preferences.json`). The GUI panel has a
+**⏹ Stop** button that cancels a running distillation within ~1 second — even
+mid-retry-backoff — recording the spend so far and never leaving a partial
+companion, plus a **Copy Logs** button for the distillation log. For a free,
+zero-network cost preview:
 
 ```bash
 rag-distill "Book - Author (2016).md" --dry-run   # chunk plan + table inventory + cost estimate

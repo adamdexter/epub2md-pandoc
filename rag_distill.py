@@ -112,7 +112,7 @@ class DistillResult:
     companion_path: str | None
     usage: UsageTotals
     skipped_reason: str | None = None
-    # 'sdk_missing'|'no_api_key'|'cost_cap'|'cost_cap_midrun'|'too_many_failures'|'api_error'|'verification_failed'|None
+    # 'sdk_missing'|'no_api_key'|'cost_cap'|'cost_cap_midrun'|'too_many_failures'|'api_error'|'verification_failed'|'cancelled'|None
     verification: VerificationReport | None = None
     chunks_total: int = 0
     chunks_failed: int = 0
@@ -125,6 +125,10 @@ class _CostCapExceeded(Exception):
 
 class _NonRetryableAPIError(Exception):
     """Internal: an auth/invalid-request API error that no retry can ever fix."""
+
+
+class _Cancelled(Exception):
+    """Internal: the caller set status['cancel'] — stop now, record spend, no companion."""
 
 
 # --------------------------------------------------------------------------- #
@@ -793,16 +797,37 @@ def _server_retry_delay(e: Exception) -> float | None:
     return None
 
 
+def _check_cancel(status: dict | None) -> None:
+    if status is not None and status.get("cancel"):
+        raise _Cancelled("stopped by user")
+
+
+def _cancellable_sleep(delay: float, status: dict | None) -> None:
+    """Sleep in <=1s slices so a user's Stop lands within ~1s even inside a
+    long server-advised 429 backoff (the classic 'it looks hung' moment)."""
+    waited = 0.0
+    while waited < delay:
+        _check_cancel(status)
+        step = min(1.0, delay - waited)
+        time.sleep(step)
+        waited += step
+    _check_cancel(status)
+
+
 def _call_model(client: Any, model: str, contents: str, config: Any, usage: UsageTotals,
                 status: dict | None, _log: Callable[[str], None], cost_cap: float) -> Any:
     """One logical call: retries with backoff, usage accumulation, live cap check.
 
     Non-retryable errors raise _NonRetryableAPIError immediately (no retries);
-    retry sleeps honor max(server retryDelay, planned backoff), capped at 60s."""
+    retry sleeps honor max(server retryDelay, planned backoff), capped at 60s;
+    status['cancel'] raises _Cancelled before any attempt and during sleeps."""
     last_error: Exception | None = None
     for attempt in range(1 + len(RETRY_BACKOFF_S)):
+        _check_cancel(status)
         try:
             resp = client.models.generate_content(model=model, contents=contents, config=config)
+        except _Cancelled:
+            raise
         except Exception as e:
             if _is_non_retryable(e):
                 raise _NonRetryableAPIError(f"non-retryable API error from {model}: {e}") from e
@@ -816,7 +841,7 @@ def _call_model(client: Any, model: str, contents: str, config: Any, usage: Usag
                 _log(f"RAG distill: {model} call failed ({e}); "
                      f"retry {attempt + 1}/{len(RETRY_BACKOFF_S)} in {delay:g}s")
                 if delay:
-                    time.sleep(delay)
+                    _cancellable_sleep(delay, status)
             continue
         _accumulate_usage(usage, model, resp, status)
         if usage.cost_usd is not None and usage.cost_usd > cost_cap:
@@ -998,7 +1023,7 @@ def _run_reduce(client: Any, quality: str, digests: list[dict], meta: tuple,
                 if not _digest_shape_ok(data):
                     raise ValueError("pre-reduce returned a wrong-shape digest")
                 merged.append(_normalize_digest(data))
-            except (_CostCapExceeded, _NonRetryableAPIError):
+            except (_CostCapExceeded, _NonRetryableAPIError, _Cancelled):
                 raise
             except Exception:
                 merged.extend(group)       # pre-reduce is an optimization; fall back to raw digests
@@ -1531,13 +1556,14 @@ def _distill(md_path: str, quality: str, accuracy_critical: bool, cost_cap_usd: 
     chunks_failed = 0
     try:
         for i, chunk in enumerate(chunks):
+            _check_cancel(status)            # user Stop lands between chunks too
             if status is not None:
                 status["chunk"] = i + 1
                 status["chunks_total"] = len(chunks)
             try:
                 digest = _map_chunk(client, map_model, chunk, meta, map_config, usage,
                                     status, _log, accuracy_critical, cost_cap_usd)
-            except _CostCapExceeded:
+            except (_CostCapExceeded, _Cancelled):
                 raise
             except _NonRetryableAPIError as e:
                 # A dead key/permission error fails every chunk identically —
@@ -1567,10 +1593,11 @@ def _distill(md_path: str, quality: str, accuracy_critical: bool, cost_cap_usd: 
                 digest = _placeholder_digest(chunk)
             digests.append(digest)
 
+        _check_cancel(status)
         try:
             reduce_out = _run_reduce(client, quality, [d for d in digests if not d.get("_failed")],
                                      meta, usage, status, _log, cost_cap_usd, typed)
-        except _CostCapExceeded:
+        except (_CostCapExceeded, _Cancelled):
             raise
         except Exception as e:
             _log(f"RAG distill: reduce stage failed ({e}) — no companion written")
@@ -1582,6 +1609,11 @@ def _distill(md_path: str, quality: str, accuracy_critical: bool, cost_cap_usd: 
         _log(f"RAG distill aborted mid-run: {e} — spend recorded, no companion written")
         record("aborted", chunks_failed)
         return DistillResult(False, None, usage, skipped_reason="cost_cap_midrun",
+                             chunks_total=len(chunks), chunks_failed=chunks_failed)
+    except _Cancelled:
+        _log("RAG distill stopped by user — spend recorded, no companion written")
+        record("aborted", chunks_failed)
+        return DistillResult(False, None, usage, skipped_reason="cancelled",
                              chunks_total=len(chunks), chunks_failed=chunks_failed)
 
     # ---- Stage 3: ASSEMBLE (deterministic) ----

@@ -2,6 +2,17 @@
 
 All notable changes to epub2md-pandoc are tracked here.
 
+## [3.4.0] - 2026-07-21
+
+### Added
+- RAG distillation panel controls (both tabs): a **Stop** button that cancels a
+  running distillation cleanly — honored before every API call, between
+  chunks/files, and once per second inside retry backoffs, so it lands within
+  ~1s even during a long 429 wait; spend stays recorded in the ledger, no
+  partial companion is ever written (`skipped_reason: cancelled`) — and a
+  **Copy Logs** button for the distillation log.
+- `POST /rag_distill_stop?source=epub|pdf` endpoint backing the Stop button.
+
 ## [3.3.0] - 2026-07-21
 
 ### Added

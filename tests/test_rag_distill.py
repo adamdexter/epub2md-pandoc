@@ -1084,20 +1084,23 @@ def test_server_retry_delay_honored_and_capped(distill_env, tmp_path, monkeypatc
             raise _APIErr(msg)
         return handler
 
+    # Sleeps are sliced into <=1s steps (so a user's Stop lands mid-backoff);
+    # assert the TOTAL waited per case plus the slice invariant.
     md = write_md(tmp_path, name="RD1 - Maria Santos 2011.md")
     run_distill(md, handler=limited("429 RESOURCE_EXHAUSTED 'retryDelay': '7s'"))
-    assert sleeps == [7.0, 7.0, 7.0]                   # max(planned 0, server 7)
+    assert sum(sleeps) == 21.0                         # 3 retries x max(planned 0, server 7)
+    assert max(sleeps) <= 1.0                          # cancellable slices, never one big sleep
 
     sleeps.clear()
     md2 = write_md(tmp_path, name="RD2 - Maria Santos 2011.md")
     run_distill(md2, handler=limited("429 RESOURCE_EXHAUSTED 'retryDelay': '300s'"))
-    assert sleeps == [60.0, 60.0, 60.0]                # capped at MAX_RETRY_DELAY_S
+    assert sum(sleeps) == 180.0                        # 3 x 60: capped at MAX_RETRY_DELAY_S
 
     sleeps.clear()
     monkeypatch.setattr(rd, "RETRY_BACKOFF_S", (10, 10, 10))
     md3 = write_md(tmp_path, name="RD3 - Maria Santos 2011.md")
     run_distill(md3, handler=limited("429 RESOURCE_EXHAUSTED 'retryDelay': '7s'"))
-    assert sleeps == [10.0, 10.0, 10.0]                # planned backoff wins when larger
+    assert sum(sleeps) == 30.0                         # planned backoff wins when larger
 
 
 # --------------------------------------------------------------------------- #
@@ -1219,3 +1222,49 @@ def test_estimate_output_guess_calibrated():
     assert est["est_output_tokens"] > 4_000            # ratio branch exercised, not the floor
     small = rd.estimate_run("# T\n\ntiny body.")
     assert small["est_output_tokens"] == 4_000         # floor intact
+
+
+# --------------------------------------------------------------------------- #
+# 26. Stop button: cooperative cancellation
+# --------------------------------------------------------------------------- #
+
+def test_cancel_between_chunks(distill_env, tmp_path):
+    """cancel set after the first map call aborts cleanly: spend recorded
+    (outcome 'aborted'), no companion, no orphan .tmp, reason 'cancelled'."""
+    md = write_md(tmp_path)
+    status = {}
+
+    def handler(model, contents, config, call_no):
+        status["cancel"] = True          # user hits Stop right after call 1 returns
+        return FakeResponse(json.dumps(DIGEST), prompt=1000)
+
+    logs = []
+    result, client = run_distill(md, handler=handler, logs=logs, status=status)
+    assert result.ok is False and result.skipped_reason == "cancelled"
+    assert len(client.calls) == 1                  # nothing runs after the Stop
+    assert not list(tmp_path.glob("*.rag.md")) and not list(tmp_path.glob("*.tmp"))
+    row = json.loads(rd.USAGE_LEDGER.read_text())["runs"][-1]
+    assert row["outcome"] == "aborted" and row["calls"] == 1
+    assert any("stopped by user" in ln for ln in logs)
+
+
+def test_cancel_lands_inside_retry_backoff(distill_env, tmp_path, monkeypatch):
+    """Stop during a long 429 backoff: honored within one 1s sleep slice —
+    never the full server-advised 58s wait, and no retry attempt after it."""
+    md = write_md(tmp_path)
+    status = {}
+    sleeps = []
+
+    def fake_sleep(s):
+        sleeps.append(s)
+        status["cancel"] = True          # Stop arrives mid-backoff
+
+    monkeypatch.setattr(rd.time, "sleep", fake_sleep)
+
+    def handler(model, contents, config, call_no):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED retryDelay: 58s")
+
+    result, client = run_distill(md, handler=handler, status=status)
+    assert result.skipped_reason == "cancelled"
+    assert sleeps == [1.0]                         # sliced sleep: one slice, not 58s
+    assert len(client.calls) == 1                  # no retry attempt after Stop

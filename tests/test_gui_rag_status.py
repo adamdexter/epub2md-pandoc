@@ -44,7 +44,8 @@ def _pending_rag(source):
             "chunk": 0, "chunks_total": 0, "calls": 0,
             "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
             "estimate_only": False, "lifetime_usd": None,
-            "source": source, "completed": False}
+            "source": source, "completed": False,
+            "cancel": False, "cancelled": False}
 
 
 def _pending_si():
@@ -358,3 +359,85 @@ def test_template_js_contracts():
     # Completion re-renders the main log so Copy Logs captures the cost line.
     assert "async function refreshMainLog" in html
     assert "refreshMainLog(suffix)" in html
+
+
+# --------------------------------------------------------------------------- #
+# Stop button: /rag_distill_stop + runner short-circuit + proxy delegation
+# --------------------------------------------------------------------------- #
+
+def test_stop_route_targets_correct_source(gui_mod, monkeypatch):
+    gui = gui_mod
+    client = gui.app.test_client()
+    gui.rag_distill_status_pdf["running"] = True
+
+    resp = client.post("/rag_distill_stop?source=pdf")
+    body = resp.get_json()
+    assert resp.status_code == 200 and body["ok"] and body["was_running"]
+    assert gui.rag_distill_status_pdf["cancel"] is True
+    assert gui.rag_distill_status["cancel"] is False        # EPUB dict untouched
+    # The in-panel notice lands only on the running source's log.
+    assert any("Stop requested" in ln for ln in gui.rag_distill_status_pdf["progress"])
+    assert not gui.rag_distill_status["progress"]
+
+    # Idempotent no-op when nothing is running.
+    body2 = client.post("/rag_distill_stop?source=epub").get_json()
+    assert body2["ok"] and body2["was_running"] is False
+    assert gui.rag_distill_status["cancel"] is True
+
+
+def test_runner_stops_remaining_files_on_cancel(gui_mod, monkeypatch):
+    """distill_markdown returns skipped_reason='cancelled' for file 1 →
+    the runner never starts file 2 and marks the run cancelled."""
+    gui = gui_mod
+    seen = []
+
+    def fake_distill(md_path, **kwargs):
+        seen.append(md_path)
+        return SimpleNamespace(ok=False, skipped_reason="cancelled",
+                               usage=FakeUsage(calls=2, cost_usd=0.05))
+
+    monkeypatch.setitem(sys.modules, "rag_distill", _fake_rag_module(fake_distill))
+    gui._run_rag_distill([("a.epub", "a.md"), ("b.epub", "b.md")],
+                         {}, source="epub", accuracy_critical=False)
+    st = gui.rag_distill_status
+    assert seen == ["a.md"]                                  # file 2 never started
+    assert st["cancelled"] is True and st["completed"] is True
+    assert st["cost_usd"] == 0.05                            # spend still surfaced
+
+
+def test_runner_skips_all_files_when_cancelled_before_start(gui_mod, monkeypatch):
+    gui = gui_mod
+    called = []
+
+    def fake_distill(md_path, **kwargs):
+        called.append(md_path)
+        return SimpleNamespace(ok=True, skipped_reason=None, usage=FakeUsage())
+
+    monkeypatch.setitem(sys.modules, "rag_distill", _fake_rag_module(fake_distill))
+
+    # Stop arrived between the route reset and the thread reaching the loop.
+    orig_pending = gui._pending_rag_status
+
+    def pending_with_cancel(source):
+        st = orig_pending(source)
+        st["cancel"] = True
+        return st
+
+    monkeypatch.setattr(gui, "_pending_rag_status", pending_with_cancel)
+    gui._run_rag_distill([("a.epub", "a.md")], {}, source="epub", accuracy_critical=False)
+    assert called == []
+    assert gui.rag_distill_status["cancelled"] is True
+    assert gui.rag_distill_status["completed"] is True
+
+
+def test_proxy_delegates_cancel_to_run_status(gui_mod):
+    """distill_markdown reads cancel through the per-file proxy: a Stop set on
+    the RUN status must be visible via proxy.get('cancel')."""
+    gui = gui_mod
+    run_status = {"cancel": False}
+    proxy = gui._RunStatusProxy(run_status, FakeUsage())
+    assert proxy.get("cancel") is False
+    run_status["cancel"] = True
+    assert proxy.get("cancel") is True                       # delegated, not stale
+    proxy["chunk"] = 3                                       # passthrough still works
+    assert run_status["chunk"] == 3
