@@ -1228,7 +1228,7 @@ def test_estimate_output_guess_calibrated():
 # 26. Stop button: cooperative cancellation
 # --------------------------------------------------------------------------- #
 
-def test_cancel_between_chunks(tmp_path):
+def test_cancel_between_chunks(distill_env, tmp_path):
     """cancel set after the first map call aborts cleanly: spend recorded
     (outcome 'aborted'), no companion, no orphan .tmp, reason 'cancelled'."""
     md = write_md(tmp_path)
@@ -1248,7 +1248,7 @@ def test_cancel_between_chunks(tmp_path):
     assert any("stopped by user" in ln for ln in logs)
 
 
-def test_cancel_lands_inside_retry_backoff(tmp_path, monkeypatch):
+def test_cancel_lands_inside_retry_backoff(distill_env, tmp_path, monkeypatch):
     """Stop during a long 429 backoff: honored within one 1s sleep slice —
     never the full server-advised 58s wait, and no retry attempt after it."""
     md = write_md(tmp_path)
