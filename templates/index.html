@@ -665,9 +665,18 @@
             <div id="rag-distill-container" class="progress-container">
                 <div class="progress-header">
                     <h3>🧠 RAG Knowledge Distillation</h3>
-                    <span id="rag-distill-badge" class="status-badge status-running">
-                        <span class="spinner"></span> Distilling...
-                    </span>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span id="rag-distill-badge" class="status-badge status-running">
+                            <span class="spinner"></span> Distilling...
+                        </span>
+                        <button type="button" id="rag-distill-stop" class="btn btn-secondary copy-btn" style="display: none;"
+                                onclick="stopRagDistill('')" title="Stop distilling (spend is recorded; no partial companion is written)">
+                            ⏹ Stop
+                        </button>
+                        <button type="button" class="btn btn-secondary copy-btn" onclick="copyRagLogs('')" title="Copy distillation logs to clipboard">
+                            Copy Logs
+                        </button>
+                    </div>
                 </div>
                 <div class="progress-log" id="rag-distill-log">
                     <p>Waiting for conversion to finish...</p>
@@ -854,9 +863,18 @@
                 <div id="rag-distill-container-pdf" class="progress-container">
                     <div class="progress-header">
                         <h3>🧠 RAG Knowledge Distillation</h3>
-                        <span id="rag-distill-badge-pdf" class="status-badge status-running">
-                            <span class="spinner"></span> Distilling...
-                        </span>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span id="rag-distill-badge-pdf" class="status-badge status-running">
+                                <span class="spinner"></span> Distilling...
+                            </span>
+                            <button type="button" id="rag-distill-stop-pdf" class="btn btn-secondary copy-btn" style="display: none;"
+                                    onclick="stopRagDistill('-pdf')" title="Stop distilling (spend is recorded; no partial companion is written)">
+                                ⏹ Stop
+                            </button>
+                            <button type="button" class="btn btn-secondary copy-btn" onclick="copyRagLogs('-pdf')" title="Copy distillation logs to clipboard">
+                                Copy Logs
+                            </button>
+                        </div>
                     </div>
                     <div class="progress-log" id="rag-distill-log-pdf">
                         <p>Waiting for conversion to finish...</p>
@@ -1070,12 +1088,20 @@
                 }
 
                 const badge = document.getElementById('rag-distill-badge' + suffix);
+                const stopBtn = document.getElementById('rag-distill-stop' + suffix);
                 if (data.completed) {
+                    if (stopBtn) {
+                        stopBtn.style.display = 'none';
+                        stopBtn.disabled = false;
+                        stopBtn.textContent = '⏹ Stop';
+                    }
                     badge.className = 'status-badge status-complete';
                     const lines = data.progress || [];
                     const problem = lines.slice().reverse().find(
                         l => /skipped|unavailable|failed|error|abort/i.test(l));
-                    if (!data.total && !data.calls) {
+                    if (data.cancelled) {
+                        badge.innerHTML = '⏹ Stopped — $' + (data.cost_usd || 0).toFixed(4) + ' spent, no companion';
+                    } else if (!data.total && !data.calls) {
                         // Run finalized with nothing to distill (zero converted
                         // files or the post-step was skipped): clean idle state.
                         badge.innerHTML = '— Nothing to distill';
@@ -1088,8 +1114,12 @@
                     }
                     refreshMainLog(suffix);
                 } else {
-                    badge.innerHTML = '<span class="spinner"></span> Distilling ' +
-                        (data.chunk || 0) + '/' + (data.chunks_total || 0) +
+                    if (stopBtn && data.running && !data.cancel) {
+                        stopBtn.style.display = '';
+                    }
+                    badge.innerHTML = '<span class="spinner"></span> ' +
+                        (data.cancel ? 'Stopping…' : 'Distilling ' +
+                        (data.chunk || 0) + '/' + (data.chunks_total || 0)) +
                         '… $' + (data.cost_usd || 0).toFixed(4);
                     setTimeout(() => pollRagDistill(suffix), 1000);
                 }
@@ -1632,6 +1662,55 @@
             return String(s).replace(/[&<>"']/g, c => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
             }[c]));
+        }
+
+        // ========== RAG panel: Stop + Copy Logs ==========
+        // Ask the backend to cancel the running distillation for this tab.
+        // rag_distill honors the flag before every API call, between files,
+        // and once per second inside retry backoffs — so Stop lands within
+        // ~1s even mid-backoff. Spend stays recorded; no partial companion.
+        async function stopRagDistill(suffix) {
+            const stopBtn = document.getElementById('rag-distill-stop' + suffix);
+            if (stopBtn) {
+                stopBtn.disabled = true;
+                stopBtn.textContent = 'Stopping…';
+            }
+            try {
+                const source = suffix === '-pdf' ? 'pdf' : 'epub';
+                await fetch('/rag_distill_stop?source=' + source, { method: 'POST' });
+            } catch (error) {
+                console.error('Error requesting RAG distill stop:', error);
+                if (stopBtn) {
+                    stopBtn.disabled = false;
+                    stopBtn.textContent = '⏹ Stop';
+                }
+            }
+        }
+
+        // Copy the RAG panel's log (mirrors copyLogs; event.target scopes the
+        // feedback to whichever tab's button was clicked).
+        async function copyRagLogs(suffix) {
+            const logText = document.getElementById('rag-distill-log' + suffix).innerText;
+            const copyBtn = event.target;
+            try {
+                await navigator.clipboard.writeText(logText);
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = 'Copied!';
+                copyBtn.style.background = '#28a745';
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                    copyBtn.style.background = '';
+                }, 2000);
+            } catch (error) {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = logText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                alert('Logs copied to clipboard!');
+            }
         }
 
         // ========== Copy Logs Function ==========
